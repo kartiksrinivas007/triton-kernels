@@ -3,97 +3,62 @@ import triton
 import torch
 import jaxtyping
 import triton.language as tl
+import triton.runtime.driver as driver
 
-from kernels.simple_kernels import (
-    add_constant_kernel,
-    add_along_first_axis_kernel,
-    conv2d_kernel,
-)
+from kernels.simple_kernels import *
+from kernels.flash_attn import *
+
+def _get_gpu_specifications():
+
+    assert torch.cuda.is_available(), "CUDA must be avialble to run triton kernels"
+    DEVICE = driver.active.get_active_torch_device() # type: ignore
+
+    properties = driver.active.utils.get_device_properties(DEVICE.index) # type:ignore
+    NUM_SM = properties["multiprocessor_count"]
+    NUM_REGS = properties["max_num_regs"]
+    SIZE_SMEM = properties["max_shared_mem"]
+    WARP_SIZE = properties["warpSize"]
+
+    print("Device = ", DEVICE)
+    print("Num REGS per SM  = ", NUM_REGS)
+    print("Num SM  = ", NUM_SM)
+    print("Total Shared memory (bytes) = ", SIZE_SMEM)
+    print("Warp size = ", WARP_SIZE)
+
+    return DEVICE, properties
+
+
+def print_kernel_usage(triton_kernel, properties, **kwargs,):
+    pass
 
 
 if __name__ == "__main__":
 
-    assert torch.cuda.is_available(), "CUDA must be avialble to run triton kernels"
+    DEVICE, properties = _get_gpu_specifications()
 
-    size = 1000
-    x = torch.rand(size, device="cuda")
-    y = torch.rand((size, size), device="cuda")
+    target = triton.runtime.driver.active.get_current_target()
+    kernels = {}
 
-    output = torch.empty_like(x)
-    grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
+    BATCH_SIZE = 2
+    HEADS = 4
+    SEQLEN = 10240
+    HEAD_DIM = 128
 
-    BLOCK_SIZE = 16
-    CONSTANT = 5
+    Q = torch.randn((BATCH_SIZE, HEADS, SEQLEN, HEAD_DIM), device=DEVICE, dtype=torch.float32)
+    K = torch.randn((BATCH_SIZE, HEADS, SEQLEN, HEAD_DIM), device=DEVICE, dtype=torch.float32)
+    V = torch.randn((BATCH_SIZE, HEADS, SEQLEN, HEAD_DIM), device=DEVICE, dtype=torch.float32)
+    O = torch.empty_like(Q)
 
-    # add_constant_kernel[grid](
-    #     x,
-    #     output,
-    #     x.shape[0],
-    #     x.stride(0),
-    #     output.stride(0),
-    #     BLOCK_SIZE=tl.constexpr(BLOCK_SIZE),
-    #     constant=CONSTANT
-    # )
-
-    # print(x)
-    # print(output)
-
-    # grid_second = lambda meta : (triton.cdiv(size, meta["BLOCK_SIZE_M"]), )
-    # add_along_first_axis_kernel[grid_second](
-    #     y,
-    #     output,
-    #     size,
-    #     tl.constexpr(size),
-    #     y.stride(0),
-    #     y.stride(1),
-    #     output.stride(0),
-    #     BLOCK_SIZE_M=tl.constexpr(BLOCK_SIZE),
-    #     BLOCK_SIZE_T=tl.constexpr(BLOCK_SIZE),
-    # )
-    # print(y)
-    # print(output)
-    # print(output  - torch.sum(y, dim=1))
-
-    B = 200
-    H = 10
-    W = 10
-    KH = 2
-    KW = 2
-    x = torch.ones((B, H, W), device="cuda")
-    k = torch.randn((KH, KW), device="cuda")
-    z_real = torch.nn.functional.conv2d(
-        x[:, None, ...], k[None, None, ...]
-    ).squeeze(1)
-    z = torch.zeros_like(z_real)
-    print(z.shape)
-    grid_third = lambda meta: (triton.cdiv(B, meta["BLOCK_SIZE"]),)
+    def simple_attention_forward(Q, K, V, scale, causal=False):  
+        P = torch.matmul(Q, K.transpose(2, 3)) * scale
+        M = torch.tril(torch.ones(SEQLEN, SEQLEN, device = DEVICE))
+        if causal:
+            P[:, :, M == 0] = float("-inf")
+        P = torch.softmax(P.float(), dim=-1)
+        O = torch.matmul(P, V)
+        return O
     
-    # pass these to the tensor then
-    conv2d_kernel[grid_third](
-        x,
-        k,
-        z,
-        # sizes
-        B,
-        tl.constexpr(H),
-        tl.constexpr(W),
-        tl.constexpr(KH),
-        tl.constexpr(KW),
-        tl.constexpr(H - KH + 1),
-        tl.constexpr(W - KW + 1),
-        # strides
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        k.stride(0),
-        k.stride(1),
-        z.stride(0),
-        z.stride(1),
-        z.stride(2),
-        # BLOCKS
-        BLOCK_SIZE=tl.constexpr(BLOCK_SIZE),
-    )
+    print(simple_attention_forward(Q, K, V, scale = 1/np.sqrt(HEAD_DIM)))
 
-    print(z == z_real)
 
     pass
