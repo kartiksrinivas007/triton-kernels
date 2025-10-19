@@ -89,7 +89,7 @@ def conv2d_kernel(
     z_stride_h,
     z_stride_w,
     # tunable params (block sizes)
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
 
     DEBUG = False
@@ -101,7 +101,7 @@ def conv2d_kernel(
     offset_k_h = tl.arange(0, k_size_h)
     offset_k_w = tl.arange(0, k_size_w)
     k_ptrs = k_ptr + offset_k_h[:, None] * k_stride_h + offset_k_w[None, :] * k_stride_w
-    k_full = tl.load(k_ptrs) 
+    k_full = tl.load(k_ptrs)
     # we do not need masks here because we know the full thing sits in memory, this means that the load
     # that is done must be a multiple of a power of 2, else this might cause issues
 
@@ -129,19 +129,24 @@ def conv2d_kernel(
 
             # broadcast and multiply the block with k
             xk = x_block * k_full[None, :, :]
-            xk_sum = tl.sum(xk, axis = 1) # multi axis sum is not supported
-            xk_sum = tl.sum(xk_sum, axis = 1) 
+            xk_sum = tl.sum(xk, axis=1)  # multi axis sum is not supported
+            xk_sum = tl.sum(xk_sum, axis=1)
 
             # then store these in the appropriate location of z (single location per batch)
             # the other 2 dims are constants
-            z_ptr_to_store = z_ptr + (offset_b * z_stride_b) + (offset_base_h * z_stride_h) + (offset_base_w * z_stride_w)
+            z_ptr_to_store = (
+                z_ptr
+                + (offset_b * z_stride_b)
+                + (offset_base_h * z_stride_h)
+                + (offset_base_w * z_stride_w)
+            )
 
             # only need validity for something that could potentially go outside, the last two are true by definition
             mask_z_is_valid = offset_b < x_size_b
 
             tl.store(z_ptr_to_store, xk_sum, mask_z_is_valid)
 
-            if pid == 1 and offset_base_h ==0 and offset_base_w == 0  and DEBUG:
+            if pid == 1 and offset_base_h == 0 and offset_base_w == 0 and DEBUG:
                 tl.device_print("X block = ", x_block.shape[0])
                 tl.device_print("pid =  ", pid)
             pass

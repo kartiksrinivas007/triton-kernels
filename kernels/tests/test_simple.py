@@ -6,7 +6,6 @@ from kernels.simple_kernels import *
 
 
 class TestSimpleKernels:
-    
 
     @classmethod
     def setup_class(cls):
@@ -17,7 +16,6 @@ class TestSimpleKernels:
         cls.BLOCK_SIZE = 16
 
         pass
-
 
     def test_addition_kernel(self):
         assert torch.cuda.is_available(), "CUDA must be avialble to run triton kernels"
@@ -37,23 +35,22 @@ class TestSimpleKernels:
             x.stride(0),
             output.stride(0),
             BLOCK_SIZE=tl.constexpr(BLOCK_SIZE),
-            constant=CONSTANT
+            constant=CONSTANT,
         )
 
         triton.testing.assert_close(output, x + CONSTANT)
 
         pass
 
-    
     def test_axis_one_kernel(self):
 
         y = self.y
         size = self.size
 
-        real_sum= y.sum(1)
+        real_sum = y.sum(1)
         output = torch.empty_like(real_sum)
 
-        grid_second = lambda meta : (triton.cdiv(size, meta["BLOCK_SIZE_M"]), )
+        grid_second = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE_M"]),)
         add_along_first_axis_kernel[grid_second](
             y,
             output,
@@ -69,9 +66,8 @@ class TestSimpleKernels:
         pass
 
 
-
 class TestConv2dKernels:
-   
+
     # BLOCK_SIZE = 16
     # B = 200
     # H = 10
@@ -86,7 +82,7 @@ class TestConv2dKernels:
     # z = torch.zeros_like(z_real)
     # print(z.shape)
     # grid_third = lambda meta: (triton.cdiv(B, meta["BLOCK_SIZE"]),)
-    
+
     # # pass these to the tensor then
     # conv2d_kernel[grid_third](
     #     x,
@@ -111,4 +107,5 @@ class TestConv2dKernels:
     #     z.stride(2),
     #     # BLOCKS
     #     BLOCK_SIZE=tl.constexpr(BLOCK_SIZE),
-    # ) 
+    # )
+    pass

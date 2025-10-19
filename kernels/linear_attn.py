@@ -48,7 +48,7 @@ def make_tensor_descriptor(pointer, stride, shape, block_shape) -> tl.tensor_des
     prune_configs_by={"block_bigger_than_size_prune": prune_invalid_configs},
 )
 @triton.jit
-def flash_attn_fwd_wrapper_kernel(
+def linear_attn_fwd_wrapper_kernel(
     q_ptr,
     k_ptr,
     v_ptr,
@@ -150,7 +150,7 @@ def flash_attn_fwd_wrapper_kernel(
     #   a. Load K, V Block, and multiply with Q (Linear Attention Kernel)
     #   b. Add the (QK^T)V to the accumulator
     # 2. Store the accumulated result to O
-    flash_attn_inner_kernel(
+    linear_attn_inner_kernel(
         q_block,
         desc_k,
         desc_v,
@@ -173,7 +173,7 @@ def flash_attn_fwd_wrapper_kernel(
 
 
 @triton.jit
-def flash_attn_inner_kernel(
+def linear_attn_inner_kernel(
     q_block,
     desc_k,
     desc_v,
@@ -198,13 +198,7 @@ def flash_attn_inner_kernel(
         + offset_head * seqlen
         + offset_m * BLOCK_SIZE_M
     )
-
-    LOG2E = 1.4426950489
-
     acc = tl.zeros((BLOCK_SIZE_M, HEAD_DIM), dtype=tl.float32)
-    running_max = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
-    running_exp_sum_neg_max = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
-
     for kv_index in tl.range(0, seqlen, BLOCK_SIZE_N):  # type: ignore
 
         # The kv_index is the row that needs to be loaded
@@ -215,35 +209,9 @@ def flash_attn_inner_kernel(
         v_block = desc_v.load([row_offset_k, 0])
 
         qk_t = tl.dot(q_block, k_block.T) * scale
-        max_qk_t = tl.max(qk_t, axis=1, keep_dims=True)
-        qk_t = (qk_t - max_qk_t).to(tl.float32)
-        present_exp_sum_neg_max = tl.sum(
-            tl.exp2(LOG2E * qk_t), axis=1, keep_dims=True
-        ).to(tl.float32)
-
-        # update the running variables
-
-        running_max_updated = tl.maximum(max_qk_t, running_max)
-        running_exp_sum_neg_max_updated = present_exp_sum_neg_max * tl.exp(
-            max_qk_t - running_max_updated
-        ) + running_exp_sum_neg_max * tl.exp(running_max - running_max_updated)
-
-        # correct for exp subtraction
-        qk_t = qk_t + max_qk_t - running_max_updated
-        attn_kernel = (tl.exp2(LOG2E * qk_t) / running_exp_sum_neg_max_updated).to(
-            tl.float32
-        )
-        attn_kernel = tl.dot(attn_kernel, v_block)
-        acc = (
-            attn_kernel
-            + acc
-            * tl.exp(running_max - running_max_updated)
-            * running_exp_sum_neg_max
-            / running_exp_sum_neg_max_updated
-        )
-
-        running_max = running_max_updated
-        running_exp_sum_neg_max = running_exp_sum_neg_max_updated
+        qk_t = qk_t.to(tl.float32)
+        linear_kernel = tl.dot(qk_t, v_block)
+        acc += linear_kernel.to(tl.float32)
 
     # store acc in appropriate block of o
     desc_o.store([row_offset_o, 0], acc)
@@ -251,11 +219,11 @@ def flash_attn_inner_kernel(
 
 
 @triton.jit
-def flash_attn_bwd_kernel():
+def linear_attn_bwd_kernel():
     pass
 
 
-class FlashAttention(torch.autograd.Function):
+class LinearAttention(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v):
@@ -287,7 +255,7 @@ class FlashAttention(torch.autograd.Function):
         assert v.is_contiguous()
         assert o.is_contiguous()
 
-        flash_attn_fwd_wrapper_kernel[ctx.grid](
+        linear_attn_fwd_wrapper_kernel[ctx.grid](
             q,
             k,
             v,
