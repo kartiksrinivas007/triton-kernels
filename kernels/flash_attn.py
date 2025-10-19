@@ -11,8 +11,8 @@ from typing import Optional
 
 configs = [
     triton.Config({"BLOCK_SIZE_M": BM, "BLOCK_SIZE_N": BN})
-    for BM in [16, 32]
-    for BN in [16, 32]
+    for BM in [32, 64, 128]
+    for BN in [32, 64, 128]
 ]
 
 
@@ -142,7 +142,7 @@ def flash_attn_fwd_wrapper_kernel(
     # desc_o.store([row_offset_o_block, 0], tl.abs(q_block))
 
     # -----------------------------------------------------------------
-    # Linear Attention Kernel
+    # Flash Attention Kernel
     # -----------------------------------------------------------------
     # Steps
     # Init accumulator to all zeros shape = shape of O block, same dtype
