@@ -76,6 +76,7 @@ if __name__ == "__main__":
     HEAD_DIM = 64
     MAMBA_HEAD_DIM = 32
     N_HEADS = 2
+    MODE = "mamba"
 
     # BLOCK SIZE constants
     BLOCK_SIZE_M = 8
@@ -94,18 +95,18 @@ if __name__ == "__main__":
     B_m = rearrange(P.to(torch.float32), "b l 1 -> b l 1 1")
     C_m = torch.ones_like(B_m)
 
+    if MODE == "MAMBA":
+        mamba_z = mamba_chunk_scan_combined(
+            X_m,
+            dt,
+            A,
+            B_m,
+            C_m,
+            chunk_size=BLOCK_SIZE_M,
+            seq_idx=None
+        )
 
-    # mamba_z = mamba_chunk_scan_combined(
-    #     X_m,
-    #     dt,
-    #     A,
-    #     B_m,
-    #     C_m,
-    #     chunk_size=BLOCK_SIZE_M,
-    #     seq_idx=None
-    # )
-
-    # mamba_z = rearrange(mamba_z, "b l h p -> b l (h p)")
+        mamba_z = rearrange(mamba_z, "b l h p -> b l (h p)")
     
     
     def ema_simple(X, P):

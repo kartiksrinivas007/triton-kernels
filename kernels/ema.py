@@ -33,25 +33,20 @@ def prune_invalid_configs(configs, named_args, **kwargs):
 
 
 @triton.jit
-def ema_chunk_kernel(
+def ema_within_chunk_kernel(
     X_ptr, P_ptr, Z_ptr,
     prod_ptr, sum_ptr,
-    # strides for X: (B, T, D)
     stride_xB, stride_xT, stride_xD,
-    # strides for P: (B, T, 1)
     stride_pB, stride_pT, stride_pD,
-    # strides for Z: (B, T, D)
     stride_zB, stride_zT, stride_zD,
-    # strides for prod: (B, C, 1)
     stride_prodB, stride_prodC, stride_prodD,
-    # strides for sum: (B, C, D)
     stride_sumB, stride_sumC, stride_sumD,
-    T: tl.constexpr,
+    T,
     D: tl.constexpr,
     BLOCK_T: tl.constexpr,
 ):
-    pid_b = tl.program_id(0)       # batch index
-    pid_chunk = tl.program_id(1)   # chunk index along time
+    pid_b = tl.program_id(0)       
+    pid_chunk = tl.program_id(1)   
 
     start_t = pid_chunk * BLOCK_T
 
@@ -60,15 +55,14 @@ def ema_chunk_kernel(
     p_base = P_ptr + pid_b * stride_pB
     z_base = Z_ptr + pid_b * stride_zB
 
-    offs_d = tl.arange(0, D)       # vector of D offsets
-    offs_d1 = tl.arange(0, 1)      # vector of length-1 for prod block pointer
+    offs_d = tl.arange(0, D) # vector of D offsets
+    offs_d1 = tl.arange(0, 1) # vector of length-1 for prod block pointer
 
     # state
-    z = tl.zeros((D,), dtype=tl.float32)                 # vector across D
-    decay_prod = tl.full((1,), 1.0, dtype=tl.float32)    # scalar as length-1 vector
+    z = tl.zeros((D,), dtype=tl.float32) # vector across D
+    decay_prod = tl.full((1,), 1.0, dtype=tl.float32) # scalar as length-1 vector
 
-    # iterate BLOCK_T steps (masked)
-    for i in range(BLOCK_T):
+    for i in tl.static_range(BLOCK_T):
         curr_t = start_t + i
         in_range = curr_t < T   # python bool usable as mask
 
@@ -78,10 +72,11 @@ def ema_chunk_kernel(
         p_ptr = p_base + curr_t * stride_pT                        # scalar pointer (last dim = 1)
 
         # masked loads
-        x = tl.load(x_ptr, mask=in_range, other=0.0)        # (D,)
+        x = tl.load(x_ptr, mask=in_range, other=0.0) # (D,)
         p_scalar = tl.load(p_ptr, mask=in_range, other=0.0) # (1,)
 
         # updates (p_scalar broadcasts over D)
+        #TODO(kartiksrinivas): Do this in log space
         new_z = (1.0 - p_scalar) * z + p_scalar * x
         new_decay = decay_prod * (1.0 - p_scalar)
 
@@ -104,6 +99,60 @@ def ema_chunk_kernel(
     # store the D-vector final z into sum_out_ptr
     tl.store(sum_out_ptr, z)
 
+
+
+@triton.jit
+def ema_state_passing_kernel(
+    Z_ptr, prod_ptr, sum_ptr, 
+    o_ptr,
+    
+    Z_strideB, Z_strideT, Z_strideD,
+    prod_strideB, prod_strideC, prod_strideD,
+    sum_strideB, sum_strideC, sum_strideD,
+    o_strideB, o_strideC, o_strideD,
+
+
+    T,
+    D:tl.constexpr,
+    BLOCK_T:tl.constexpr
+):
+    pid_b = tl.program_id(axis = 0)
+
+    z_base = Z_ptr + pid_b * Z_strideB
+    prod_base = prod_ptr + pid_b * prod_strideB
+    sum_base = sum_ptr + pid_b * sum_strideB
+    o_base = o_ptr + pid_b * o_strideB
+
+
+    offset_d = tl.arange(0, D)
+    # no mask needed, the head dim is assumed perfectly matched
+    single_offset = tl.arange(0, 1)
+    
+    num_chunks = (T + BLOCK_T - 1) // BLOCK_T
+
+    Z_prev = tl.zeros((D, ), dtype=tl.float32) # float32 tensor for now
+
+    for chunk_index in tl.range(num_chunks): # type:ignore 
+        
+        offset_t = chunk_index * BLOCK_T
+        mask_t = offset_t < T # this is a python boolean
+
+        # load Z block  (shape (D, ))
+        Z_ptrs = z_base + offset_t * Z_strideT + offset_d * Z_strideD # (D, )
+        prod_ptrs = prod_base + chunk_index * prod_strideC + single_offset * prod_strideD # this is a scalar (1,)
+        sum_ptrs = sum_base + chunk_index * sum_strideC +  offset_d * sum_strideD # (D, )
+        o_ptrs = o_base + chunk_index * o_strideC + offset_d * o_strideD
+
+        Z = tl.load(Z_ptrs, mask=mask_t, other=0.0)
+        prod = tl.load(prod_ptrs, mask=mask_t, other=0.0)
+        sum  = tl.load(sum_ptrs, mask=mask_t, other=0.0)
+
+        
+
+
+
+        pass
+    pass
 
 
 class EMAChunkScanCombinedFn(torch.autograd.Function):
@@ -135,7 +184,7 @@ class EMAChunkScanCombinedFn(torch.autograd.Function):
         ctx.grid = grid
 
 
-        ema_chunk_kernel[grid](
+        ema_within_chunk_kernel[grid](
             x, p, z,
             prod, sum, 
             *stride_computer(x),
