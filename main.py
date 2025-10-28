@@ -17,6 +17,7 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 
 # DEVICE = driver.active.get_active_torch_device()  # type: ignore
 
+
 def _get_gpu_specifications(DEVICE):
 
     assert torch.cuda.is_available(), "CUDA must be avialble to run triton kernels"
@@ -58,7 +59,6 @@ def print_kernel_usage(
 
 if __name__ == "__main__":
 
-
     DEVICE = driver.active.get_active_torch_device()  # type: ignore
     _, properties = _get_gpu_specifications(DEVICE)
 
@@ -72,7 +72,7 @@ if __name__ == "__main__":
     # Proabaiblity is of the same shape but is scalar
 
     BATCH_SIZE = 2
-    SEQLEN = 32
+    SEQLEN = 50
     HEAD_DIM = 64
     MAMBA_HEAD_DIM = 32
     N_HEADS = 2
@@ -84,47 +84,39 @@ if __name__ == "__main__":
     NUM_CHUNKS = (SEQLEN + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
 
     X = torch.randn((BATCH_SIZE, SEQLEN, HEAD_DIM), dtype=torch.float32, device=DEVICE)
-    P = torch.rand((BATCH_SIZE, SEQLEN, 1), dtype=torch.float32, device= DEVICE)
-    Z = torch.empty_like(X) # same shape as X, but smoothed according to P
+    P = torch.rand((BATCH_SIZE, SEQLEN, 1), dtype=torch.float32, device=DEVICE)
+    Z = torch.empty_like(X)  # same shape as X, but smoothed according to P
 
-    # X needs to be broken into a bunch of heads and the head_dim 
+    # X needs to be broken into a bunch of heads and the head_dim
 
-    dt = -torch.log(1-P).to(torch.float32).squeeze(-1)
-    X_beta = (X / dt[..., None])
+    dt = -torch.log(1 - P).to(torch.float32).squeeze(-1)
+    X_beta = X / dt[..., None]
     X_m = rearrange(X_beta, "b l (h p) -> b l h p", p=MAMBA_HEAD_DIM)
     dt = repeat(dt, "b l -> b l h", h=N_HEADS)
-    A = -1*torch.ones(N_HEADS, dtype=torch.float32, device=DEVICE)
+    A = -1 * torch.ones(N_HEADS, dtype=torch.float32, device=DEVICE)
     B_m = rearrange(P.to(torch.float32), "b l 1 -> b l 1 1")
     C_m = torch.ones_like(B_m)
 
     if MODE == "MAMBA":
         mamba_z = mamba_chunk_scan_combined(
-            X_m,
-            dt,
-            A,
-            B_m,
-            C_m,
-            chunk_size=BLOCK_SIZE_M,
-            seq_idx=None
+            X_m, dt, A, B_m, C_m, chunk_size=BLOCK_SIZE_M, seq_idx=None
         )
 
         mamba_z = rearrange(mamba_z, "b l h p -> b l (h p)")
-    
-    
+
     def ema_simple(X, P):
 
         # log space implementation of EMA in torch (otherwise floating point issues and nan)
-        alpha_clamped =  1 - P
+        alpha_clamped = 1 - P
         log_alpha = torch.log(alpha_clamped)
-        logC = torch.cumsum(log_alpha, dim=1)      
-        invC = torch.exp(-logC)           
+        logC = torch.cumsum(log_alpha, dim=1)
+        invC = torch.exp(-logC)
         weighted = (P * X) * invC
         S = torch.cumsum(weighted, dim=1)
-        Z = torch.exp(logC) * S   
+        Z = torch.exp(logC) * S
 
         return Z
-    
-    
+
     def ema_loop(X, P):
         B, T, D = X.shape
         Z = torch.zeros_like(X)
@@ -138,17 +130,21 @@ if __name__ == "__main__":
                 z_prev = z
         return Z
 
-
     simple_z = ema_simple(X, P)
     z_loop = ema_loop(X, P)
 
     ema_z = ema_scan_combined(X, P, BLOCK_T=BLOCK_SIZE_M)
-    
-    # this is of shape num_chunks
-    # check if this computes the correct values 
-    # print(ema_z)
 
-    for index in range(NUM_CHUNKS):
-        chunk_end = min((index + 1) * BLOCK_SIZE_M - 1, SEQLEN - 1)
-        assert torch.allclose(ema_z[:, index, :], z_loop[:, chunk_end, :], atol=1e-4), f"Mismatch at index = {index}" # type:ignore
-    pass
+    # this is of shape num_chunks
+    # check if this computes the correct values
+    # print(ema_z)
+    assert (torch.allclose(ema_z, z_loop, atol=1e-4))
+
+    # for index in range(1, NUM_CHUNKS):
+    #     chunk_end = min((index) * BLOCK_SIZE_M - 1, SEQLEN - 1)
+    #     assert torch.allclose(
+    #         ema_z[:, index, :], z_loop[:, chunk_end, :], atol=1e-3
+    #     ), f"Mismatch at index = {index}"  # type:ignore
+    # pass
+
+
