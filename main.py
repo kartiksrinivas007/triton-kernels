@@ -72,7 +72,7 @@ if __name__ == "__main__":
     # Proabaiblity is of the same shape but is scalar
 
     BATCH_SIZE = 2
-    SEQLEN = 50
+    SEQLEN = 512
     HEAD_DIM = 64
     MAMBA_HEAD_DIM = 32
     N_HEADS = 2
@@ -133,7 +133,7 @@ if __name__ == "__main__":
     simple_z = ema_simple(X, P)
     z_loop = ema_loop(X, P)
 
-    ema_z = ema_scan_combined(X, P, BLOCK_T=BLOCK_SIZE_M)
+    ema_z = ema_scan_combined(X, P)
 
     # this is of shape num_chunks
     # check if this computes the correct values

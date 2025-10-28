@@ -9,10 +9,15 @@ import numpy as np
 from typing import Optional
 
 
-configs = [
-    triton.Config({"BLOCK_SIZE_M": BM, "BLOCK_SIZE_N": BN})
-    for BM in [32, 64, 128]
-    for BN in [32, 64, 128]
+
+
+BLOCK_T_CANDIDATES = [4, 8, 16, 32, 64]
+WARP_CANDIDATES = [1, 2, 4]
+
+ema_configs=[
+    triton.Config({"BLOCK_T": b}, num_stages=2, num_warps=w)
+    for b in  BLOCK_T_CANDIDATES
+    for w in  WARP_CANDIDATES
 ]
 
 
@@ -23,14 +28,23 @@ def config_filter(conf):
     return BLOCK_M * BLOCK_N < 128 * 128
 
 
-# this filter is dynamic, when stuff is actually passed
-def prune_invalid_configs(configs, named_args, **kwargs):
-    N_CTX = kwargs["seqlen"]
-    # Filter out configs where BLOCK_M > the seqlen
-    configs = [conf for conf in configs if conf.kwargs.get("BLOCK_SIZE_M", 0) <= N_CTX]
-    return configs
+def early_prune(configs, named_args, **kwargs):
+    # keep only configs with BLOCK_T <= runtime sequence length T
+    # named_args contains the runtime args passed to the kernel call (e.g., T, D)
+    T = named_args.get("T", None)
+    if T is None:
+        return configs
+    return [c for c in configs if c.kwargs.get("BLOCK_T", 0) <= T]
 
 
+@triton.autotune(
+    configs=list(ema_configs),
+    key=["T", "D"],
+    prune_configs_by={
+        "early_config_prune": early_prune
+    },
+    
+)
 @triton.jit
 def ema_within_chunk_kernel(
     X_ptr,
@@ -118,7 +132,14 @@ def ema_within_chunk_kernel(
     # store the D-vector final z into sum_out_ptr
     tl.store(sum_out_ptr, z)
 
-
+@triton.autotune(
+    configs=list(ema_configs),
+    key=["T", "D"],
+    prune_configs_by={
+        "early_config_prune": early_prune
+    },
+    
+)
 @triton.jit
 def ema_state_passing_kernel(
     Z_ptr,
@@ -184,6 +205,16 @@ def ema_state_passing_kernel(
     pass
 
 
+
+
+@triton.autotune(
+    configs=list(ema_configs),
+    key=["T", "D"],
+    prune_configs_by={
+        "early_config_prune": early_prune
+    },
+    
+)
 @triton.jit
 def ema_recompute_state_kernel(
     Z_ptr,
@@ -249,7 +280,7 @@ def ema_recompute_state_kernel(
 class EMAChunkScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x, p, BLOCK_T=8):
+    def forward(ctx, x, p):
 
         ctx.dt_dtype = x.dtype
 
@@ -268,7 +299,10 @@ class EMAChunkScanCombinedFn(torch.autograd.Function):
         batch_size = x.shape[0]
         seqlen = x.shape[1]
         head_dim = x.shape[2]
-        num_chunks = (seqlen + BLOCK_T - 1) // (BLOCK_T)
+
+
+        MIN_BLOCK_T = min(BLOCK_T_CANDIDATES)
+        num_chunks = (seqlen + MIN_BLOCK_T - 1) // (MIN_BLOCK_T)
 
         z = torch.zeros_like(x)
         prod = torch.zeros((batch_size, num_chunks, 1), dtype=x.dtype, device=x.device)
@@ -290,8 +324,7 @@ class EMAChunkScanCombinedFn(torch.autograd.Function):
             *stride_computer(prod),
             *stride_computer(sum),
             seqlen,
-            head_dim,
-            BLOCK_T=BLOCK_T,
+            head_dim
         )
 
         new_states = torch.zeros_like(sum)
@@ -306,8 +339,7 @@ class EMAChunkScanCombinedFn(torch.autograd.Function):
             *stride_computer(sum),
             *stride_computer(new_states),
             seqlen,
-            head_dim,
-            BLOCK_T=BLOCK_T,
+            head_dim
         )
 
         final_states = torch.zeros_like(x)
@@ -322,8 +354,7 @@ class EMAChunkScanCombinedFn(torch.autograd.Function):
             *stride_computer(final_states),
             *stride_computer(p),
             seqlen, 
-            head_dim, 
-            BLOCK_T=BLOCK_T
+            head_dim 
         )
 
         return final_states
@@ -333,9 +364,9 @@ class EMAChunkScanCombinedFn(torch.autograd.Function):
         return None, None, None
 
 
-def ema_scan_combined(x, p, BLOCK_T):
+def ema_scan_combined(x, p):
 
     assert x.is_contiguous()
     assert p.is_contiguous()
 
-    return EMAChunkScanCombinedFn.apply(x, p, BLOCK_T)
+    return EMAChunkScanCombinedFn.apply(x, p)
