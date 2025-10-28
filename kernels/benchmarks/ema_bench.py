@@ -9,7 +9,7 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from einops import rearrange, repeat
 
 
-MAMBA_NUM_HEADS = 2
+MAMBA_NUM_HEADS = 8
 
 def ema_simple(X, P):
 
@@ -51,7 +51,7 @@ for head_dim in [64, 128, 256]:
                 line_names=["Triton", "Torch", "Ema_mamba", "Mamba"],
                 styles=[("red", "-"), ("blue", "--"), ("yellow", "-"), ("green", "--")],
                 ylabel="GB/s (approx)",
-                plot_name=f"ema_{batch_size}_{head_dim}.bench",
+                plot_name=f"ema_b{batch_size}_head_dim{head_dim}_nh{MAMBA_NUM_HEADS}.bench",
                 args={
                     "BATCH": batch_size,
                     "HEAD_DIM": head_dim,
@@ -73,10 +73,10 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
     if provider == "torch":
         # naive EMA in PyTorch
         fn = lambda: ema_simple(x, p)
-        ms = triton.testing.do_bench(fn)
+        ms = triton.testing.do_bench_cudagraph(fn)
     elif provider == "triton":
         fn = lambda: ema_scan_combined(x, p)
-        ms = triton.testing.do_bench(fn)
+        ms = triton.testing.do_bench_cudagraph(fn)
     elif provider == "ema_mamba":
         dt = -torch.log(1 - p).to(torch.float32).squeeze(-1)
         X_beta = x / dt[..., None]
@@ -87,7 +87,7 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
         C_m = torch.ones_like(B_m)
         fn = lambda: ema_chunk_scan_combined(
             X_m, dt, A, B_m, C_m, chunk_size=MAMBA_CHUNK_SIZE, seq_idx=None)
-        ms = triton.testing.do_bench(fn)
+        ms = triton.testing.do_bench_cudagraph(fn)
     elif provider == "mamba":
         dt = -torch.log(1 - p).to(torch.float32).squeeze(-1)
         X_beta = x / dt[..., None]
@@ -98,7 +98,7 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
         C_m = torch.ones_like(B_m)
         fn = lambda: mamba_chunk_scan_combined(
             X_m, dt, A, B_m, C_m, chunk_size=MAMBA_CHUNK_SIZE, seq_idx=None)
-        ms = triton.testing.do_bench(fn)
+        ms = triton.testing.do_bench_cudagraph(fn)
 
     # Rough throughput: bytes processed per second
     bytes_moved = 3 * x.numel() * x.element_size()  # read X, write Z, read p

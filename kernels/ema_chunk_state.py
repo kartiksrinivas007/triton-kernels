@@ -82,11 +82,8 @@ def _chunk_cumsum_fwd_kernel(
     #----------------------------------------------
                 # Optimization 1.
     #----------------------------------------------
-
-
     # Since A is all negative ones, we need not load it and we can recompute it
-    # instead
-    # it is unnecessary to load A here since it is all all ones
+    # instead it is unnecessary to load A here since it is all all negative ones
 
     # ----------------------------------------------
                 # OLDER CODE
@@ -165,11 +162,24 @@ def _chunk_state_fwd_kernel(
     HAS_SEQ_IDX: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
+    """
+    X : b l h p  = b c q h p
+    B: b l g d = b l 1 1  = b c q 1 1
+    A_cs : b h c q
+    dt: b h c q
+    
+    
+    BLOCK_SIZE_M over the head dim 
+    BLOCK_SIZE_N over the d_state
+    BLOCK_SIZE_K over the Sequence length (chunk_size), but this is just a
+    hyper parameter to decide how you are stepping into the chunk size
+    """
     pid_bc = tl.program_id(axis=1)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
     num_pid_n = tl.cdiv(dstate, BLOCK_SIZE_N)
+    # TODO(kartiksrinivas): Does it even make sense to do BLOCK_SIZE_N now that dstate = 1?        
     pid_m = tl.program_id(axis=0) // num_pid_n
     pid_n = tl.program_id(axis=0) % num_pid_n
     b_ptr += pid_b * stride_b_batch + pid_c * chunk_size * stride_b_seqlen + (pid_h // nheads_ngroups_ratio) * stride_b_head
@@ -182,10 +192,20 @@ def _chunk_state_fwd_kernel(
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+
+    # shape = (BLOCK_SIZE_M, BLOCK_SIZE_K) # over head_dim, seqlen
     x_ptrs = x_ptr + (offs_m[:, None] * stride_x_hdim + offs_k[None, :] * stride_x_seqlen)
+
+    # shape = (BLOCK_SIZE_N, BLOCK_SIZE_K) # over d_state, seqlen
     b_ptrs = b_ptr + (offs_n[None, :] * stride_b_dstate + offs_k[:, None] * stride_b_seqlen)
+
+    # shape = (BLOCK_SIZE_K) # over seqlen
     dt_ptrs = dt_ptr + offs_k * stride_dt_csize
+
+    # This is loading the final scalar in the cumsum
     dA_cs_last = tl.load(dA_cumsum_ptr + (chunk_size - 1) * stride_dA_cs_csize).to(tl.float32)
+
+    # shape = (BLOCK_SIZE_K)
     dA_cumsum_ptrs = dA_cumsum_ptr + offs_k * stride_dA_cs_csize
     if HAS_SEQ_IDX:
         seq_idx_ptrs = seq_idx_ptr + offs_k * stride_seq_idx_seqlen
@@ -195,6 +215,7 @@ def _chunk_state_fwd_kernel(
         seq_idx_last = tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    # ! Compute within a chunk, the matmuls with that BLOCK_SIZE_K fused for x, b
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
         x = tl.load(x_ptrs, mask=(offs_m[:, None] < hdim) & (offs_k[None, :] < chunk_size_limit - k), other=0.0)
         b = tl.load(b_ptrs, mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < dstate), other=0.0).to(tl.float32)
