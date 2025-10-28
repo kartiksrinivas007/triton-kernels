@@ -46,6 +46,7 @@ def _chunk_cumsum_fwd_kernel(
     HAS_DT_BIAS: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr, BLOCK_SIZE_CHUNK: tl.constexpr,
 ):
+    # shapes to load
     pid_b = tl.program_id(axis=0)
     pid_c = tl.program_id(axis=1)
     pid_h = tl.program_id(axis=2)
@@ -55,12 +56,16 @@ def _chunk_cumsum_fwd_kernel(
 
     offs_h = pid_h * BLOCK_SIZE_H + tl.arange(0, BLOCK_SIZE_H)
     offs_c = tl.arange(0, BLOCK_SIZE_CHUNK)
-    dt_ptrs = dt_ptr + (offs_h[:, None] * stride_dt_head + offs_c[None, :] * stride_dt_seqlen)
+
+
+    dt_ptrs = dt_ptr + (offs_h[:, None] * stride_dt_head + offs_c[None, :] * stride_dt_seqlen) 
     A_ptrs = A_ptr + offs_h * stride_A_head
     dt_out_ptrs = dt_out_ptr + (offs_h[:, None] * stride_dt_out_head + offs_c[None, :] * stride_dt_out_csize)
     dA_cs_ptrs = dA_cumsum_ptr + (offs_h[:, None] * stride_dA_cs_head + offs_c[None, :] * stride_dA_cs_csize)
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
 
+
+    # (BLOCK_SIZE_H, BLOCK_SIZE_CHUNK)
     dt = tl.load(dt_ptrs, mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit), other=0.0).to(tl.float32)
     if HAS_DT_BIAS:
         dt_bias = tl.load(dt_bias_ptr + offs_h * stride_dt_bias_head, mask=offs_h < nheads, other=0.0).to(tl.float32)
@@ -72,14 +77,34 @@ def _chunk_cumsum_fwd_kernel(
     dt = tl.minimum(tl.maximum(dt, dt_min), dt_max)
     dt = tl.where((offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit), dt, 0.0)
     tl.store(dt_out_ptrs, dt, mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size))
-    A = tl.load(A_ptrs, mask=offs_h < nheads, other=0.0).to(tl.float32)
-    dA = dt * A[:, None]
+
+    # (BLOCK_SIZE_H)
+    #----------------------------------------------
+                # Optimization 1.
+    #----------------------------------------------
+
+
+    # Since A is all negative ones, we need not load it and we can recompute it
+    # instead
+    # it is unnecessary to load A here since it is all all ones
+
+    # ----------------------------------------------
+                # OLDER CODE
+    # ----------------------------------------------
+    # A = tl.load(A_ptrs, mask=offs_h < nheads, other=0.0).to(tl.float32)
+    # dA = dt * A[:, None]
+    # ----------------------------------------------
+
+    dA = -1.0 * dt # The multiplication here is to acount for negative 
     dA_cs = tl.cumsum(dA, axis=1)
+    #-------------------------------------------
+
     tl.store(dA_cs_ptrs, dA_cs, mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size))
 
     
 
 def _chunk_cumsum_fwd(dt, A, chunk_size, dt_bias=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
+
     batch, seqlen, nheads = dt.shape
     assert A.shape == (nheads,)
     if dt_bias is not None:

@@ -138,20 +138,7 @@ if __name__ == "__main__":
     )
     ema_combined_z = rearrange(ema_combined_z, "b l h p -> b l (h p)")
 
-    # this is of shape num_chunks
-    # check if this computes the correct values
-    # print(ema_z)
-
     print(ema_combined_z - z_loop)
     print("Max diff = ", (ema_combined_z - z_loop).max())
     assert (torch.allclose(ema_combined_z, z_loop, atol=1e-2))
-    # assert (torch.allclose(ema_z, z_loop, atol=1e-4))
-
-    # for index in range(1, NUM_CHUNKS):
-    #     chunk_end = min((index) * BLOCK_SIZE_M - 1, SEQLEN - 1)
-    #     assert torch.allclose(
-    #         ema_z[:, index, :], z_loop[:, chunk_end, :], atol=1e-3
-    #     ), f"Mismatch at index = {index}"  # type:ignore
-    # pass
-
-
+    assert (torch.allclose(ema_z, z_loop, atol=1e-2))

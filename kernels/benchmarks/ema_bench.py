@@ -3,6 +3,7 @@ import triton
 import triton.testing
 import numpy as np
 from kernels.ema import ema_scan_combined
+from kernels.ema_combined import ema_chunk_scan_combined
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from einops import rearrange, repeat
@@ -39,16 +40,16 @@ def ema_loop(X, P):
 
 
 bench_configs = []
-for head_dim in [32, 64, 128]:
-    for batch_size in [1, 2]:
+for head_dim in [64, 128, 256]:
+    for batch_size in [1, 2, 4]:
         bench_configs.append(
             triton.testing.Benchmark(
                 x_names=["SEQLEN"],
-                x_vals=[2**i for i in range(7, 12)],  # 128 -> 2048
+                x_vals=[2**i for i in range(10, 15)],  # 128 -> 2048
                 line_arg="provider",
-                line_vals=["triton", "torch", "mamba"],
-                line_names=["Triton", "Torch", "Mamba"],
-                styles=[("red", "-"), ("blue", "--"), ("green", "--")],
+                line_vals=["triton", "torch", "ema_mamba", "mamba"],
+                line_names=["Triton", "Torch", "Ema_mamba", "Mamba"],
+                styles=[("red", "-"), ("blue", "--"), ("yellow", "-"), ("green", "--")],
                 ylabel="GB/s (approx)",
                 plot_name=f"ema_{batch_size}_{head_dim}.bench",
                 args={
@@ -76,6 +77,17 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
     elif provider == "triton":
         fn = lambda: ema_scan_combined(x, p)
         ms = triton.testing.do_bench(fn)
+    elif provider == "ema_mamba":
+        dt = -torch.log(1 - p).to(torch.float32).squeeze(-1)
+        X_beta = x / dt[..., None]
+        X_m = rearrange(X_beta, "b l (h p) -> b l h p", p=int(MAMBA_HEAD_DIM))
+        dt = repeat(dt, "b l -> b l h", h=MAMBA_NUM_HEADS)
+        A = -1 * torch.ones(MAMBA_NUM_HEADS, dtype=torch.float32, device=device)
+        B_m = rearrange(p.to(torch.float32), "b l 1 -> b l 1 1")
+        C_m = torch.ones_like(B_m)
+        fn = lambda: ema_chunk_scan_combined(
+            X_m, dt, A, B_m, C_m, chunk_size=MAMBA_CHUNK_SIZE, seq_idx=None)
+        ms = triton.testing.do_bench(fn)
     elif provider == "mamba":
         dt = -torch.log(1 - p).to(torch.float32).squeeze(-1)
         X_beta = x / dt[..., None]
@@ -95,4 +107,4 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
 
 
 if __name__ == "__main__":
-    bench_ema.run(print_data=True, save_path="./benchmarks/ema_scan")
+    bench_ema.run(print_data=True, save_path="./kernels/benchmarks/ema_scan")
