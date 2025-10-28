@@ -4,16 +4,21 @@ import torch
 import jaxtyping
 import triton.language as tl
 import triton.runtime.driver as driver
+from einops import rearrange, repeat
 
 from kernels.simple_kernels import *
 from kernels.flash_attn import *
 from kernels.linear_attn import *
 
 
-def _get_gpu_specifications():
+from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
+
+
+# DEVICE = driver.active.get_active_torch_device()  # type: ignore
+
+def _get_gpu_specifications(DEVICE):
 
     assert torch.cuda.is_available(), "CUDA must be avialble to run triton kernels"
-    DEVICE = driver.active.get_active_torch_device()  # type: ignore
 
     properties = driver.active.utils.get_device_properties(DEVICE.index)  # type:ignore
     NUM_SM = properties["multiprocessor_count"]
@@ -23,8 +28,9 @@ def _get_gpu_specifications():
 
     def is_cuda():
         return (
-            triton.runtime.driver.active.get_current_target().backend == "cuda" # type:ignore
-        )  # type:ignore
+            triton.runtime.driver.active.get_current_target().backend  # type: ignore
+            == "cuda"
+        )
 
     def supports_host_descriptor():
         return is_cuda() and torch.cuda.get_device_capability()[0] >= 9
@@ -51,136 +57,88 @@ def print_kernel_usage(
 
 if __name__ == "__main__":
 
-    DEVICE, properties = _get_gpu_specifications()
+
+    DEVICE = driver.active.get_active_torch_device()  # type: ignore
+    _, properties = _get_gpu_specifications(DEVICE)
 
     target = triton.runtime.driver.active.get_current_target()
     kernels = {}
 
     torch.manual_seed(42)
 
+    # define the sequence (Batch, Seqlen, Dimension)
+    # Should map to another sequence (Batch, Seqlen, Dimension)
+    # Proabaiblity is of the same shape but is scalar
+
     BATCH_SIZE = 2
-    HEADS = 4
-    SEQLEN = 1024
-    HEAD_DIM = 128
-    SCALE = 1 / np.sqrt(HEAD_DIM)
-    MUL = 1
+    SEQLEN = 32
+    HEAD_DIM = 64
+    MAMBA_HEAD_DIM = 32
+    N_HEADS = 2
 
-    Q = (
-        torch.randn(
-            (BATCH_SIZE, HEADS, SEQLEN, HEAD_DIM), device=DEVICE, dtype=torch.float32
-        )
-        * MUL
+    # BLOCK SIZE constants
+    BLOCK_SIZE_M = 32
+
+    X = torch.randn((BATCH_SIZE, SEQLEN, HEAD_DIM), dtype=torch.float32, device=DEVICE)
+    P = torch.rand((BATCH_SIZE, SEQLEN, 1), dtype=torch.float32, device= DEVICE)
+    Z = torch.empty_like(X) # same shape as X, but smoothed according to P
+
+    # X needs to be broken into a bunch of heads and the head_dim 
+    X_m = rearrange(X, "b l (h p) -> b l h p", p=MAMBA_HEAD_DIM)
+    dt = -torch.log(1-P).to(torch.float32).squeeze(-1)
+    dt = repeat(dt, "b l -> b l h", h=N_HEADS)
+    A = -1*torch.ones(N_HEADS, dtype=torch.float32, device=DEVICE)
+    B_m = rearrange(P.to(torch.float32), "b l 1 -> b l 1 1")
+    C_m = torch.ones_like(B_m)
+
+
+    mamba_z = mamba_chunk_scan_combined(
+        X_m,
+        dt,
+        A,
+        B_m,
+        C_m,
+        chunk_size= BLOCK_SIZE_M,
+        seq_idx=None
     )
-    K = (
-        torch.randn(
-            (BATCH_SIZE, HEADS, SEQLEN, HEAD_DIM), device=DEVICE, dtype=torch.float32
-        )
-        * MUL
-    )
-    V = (
-        torch.randn(
-            (BATCH_SIZE, HEADS, SEQLEN, HEAD_DIM), device=DEVICE, dtype=torch.float32
-        )
-        * MUL
-    )
-    O = torch.empty_like(Q)
 
-    def simple_attention_forward(Q, K, V, scale, causal=False):
-        P = torch.matmul(Q, K.transpose(2, 3)) * scale
-        M = torch.tril(torch.ones(SEQLEN, SEQLEN, device=DEVICE))
-        if causal:
-            P[:, :, M == 0] = float("-inf")
-        P = torch.softmax(P.float(), dim=-1)
-        O = torch.matmul(P, V)
-        return O
-
-    def linear_attention_forward(Q, K, V, scale, causal=False):
-        P = torch.matmul(Q, K.transpose(2, 3)) * scale
-        M = torch.tril(torch.ones(SEQLEN, SEQLEN, device=DEVICE))
-        if causal:
-            P[:, :, M == 0] = float("-inf")
-        O = torch.matmul(P, V)
-        return O
-
-    def flash_attention_kernel_forward(Q, K, V) -> torch.Tensor:
-        output = FlashAttention.apply(Q, K, V)
-        return output  # type:ignore
-
-    def triton_linear_attention_kernel_forward(Q, K, V) -> torch.Tensor:
-        output = LinearAttention.apply(Q, K, V)
-        return output  # type: ignore
-
-    print(
-        torch.allclose(
-            triton_linear_attention_kernel_forward(Q, K, V),
-            linear_attention_forward(Q, K, V, SCALE),
-            rtol=1e-1,
-            atol=1e-1,
-        )
-    )
-    ffw = flash_attention_kernel_forward(Q, K, V)
-    ssw = simple_attention_forward(Q, K, V, SCALE)
-
-    print(
-        torch.allclose(
-            ffw,
-            ssw,
-            rtol=1e-1,
-            atol=1e-1,
-        )
-    )
+    mamba_z = rearrange(mamba_z, "b l h p -> b l (h p)")
     
-    bench_configs = []
-    for head_dim in [32, 64, 128]:
-        for batch_size in [1, 2]:
-                for causal in [False]: # causal is not supported yet
-                    for mode in ["fwd"]: # only forward is supported
-                        bench_configs.append(
-                            triton.testing.Benchmark(
-                                x_names= ["SEQLEN"],
-                                x_vals= [2**i for i in range(7,12)],
-                                line_arg ="provider",
-                                line_vals = ["triton", "torch"],
-                                line_names = ["Triton", "Torch"],
-                                styles = [("red", '-'), ("blue", "-")],
-                                ylabel="TFLOPS",
-                                plot_name=f"attn_{batch_size}_{1}_{head_dim}.bench",
-                                args= {
-                                    "BATCH":batch_size,
-                                    "H": 1,
-                                    "HEAD_DIM": head_dim,
-                                    "causal": False,
-                                    "mode": mode,
-                                }
-                            )
-                        )
-
-    @triton.testing.perf_report(bench_configs)
-    def bench_flash_attention(BATCH, H, SEQLEN, HEAD_DIM, causal, mode, provider, device=DEVICE):
-        assert mode in ["fwd", "bwd"]
-        dtype = torch.float32
-        q = torch.randn((BATCH, H, SEQLEN, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn((BATCH, H, SEQLEN, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn((BATCH, H, SEQLEN, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        scale = 1/np.sqrt(HEAD_DIM)
-        ms = 1.0
-
-        if provider == "torch":
-            fn = lambda: simple_attention_forward(q, k, v, scale, causal)
-            ms = triton.testing.do_bench(fn)
-
-        if provider == "triton":
-            fn = lambda: flash_attention_kernel_forward(q, k, v)
-            ms = triton.testing.do_bench(fn)
-
-        flops_per_matmul = 2.0 * BATCH * H * SEQLEN * SEQLEN * HEAD_DIM
-        total_flops = 2 * flops_per_matmul
-        if causal:
-            total_flops *= 0.5
-        if mode == "bwd":
-            total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
-        return total_flops * 1e-12 / (ms * 1e-3) # type: ignore
-
     
-    bench_flash_attention.run(save_path=".", print_data=True)
+    def ema_simple(X, P):
+
+        # log space implementation of EMA in torch (otherwise floating point issues and nan)
+        alpha_clamped =  1 - P
+        log_alpha = torch.log(alpha_clamped)
+        logC = torch.cumsum(log_alpha, dim=1)      
+        invC = torch.exp(-logC)           
+        weighted = (P * X) * invC
+        S = torch.cumsum(weighted, dim=1)
+        Z = torch.exp(logC) * S   
+
+        return Z
+    
+    
+    def ema_loop(X, P):
+        B, T, D = X.shape
+        Z = torch.zeros_like(X)
+        for b in range(B):
+            z_prev = torch.zeros(D, device=X.device, dtype=X.dtype)
+            for t in range(T):
+                p = P[b, t, 0]
+                x = X[b, t]
+                z = (1.0 - p) * z_prev + p * x
+                Z[b, t] = z
+                z_prev = z
+        return Z
+
+
+    simple_z = ema_simple(X, P)
+    z_loop = ema_loop(X, P)
+
+    print(mamba_z - simple_z) #type:ignore 
+    print(torch.allclose(z_loop, simple_z, atol=1e-5)) # true
+
+    # why are mamba_z and simple_z so far from each other
+
     pass

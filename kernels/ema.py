@@ -31,15 +31,16 @@ def prune_invalid_configs(configs, named_args, **kwargs):
     return configs
 
 
-@triton.jit
-def make_tensor_descriptor(pointer, stride, shape, block_shape) -> tl.tensor_descriptor:
-    if isinstance(pointer, tl.tensor_descriptor):
-        return pointer
-    else:
-        return tl.make_tensor_descriptor(
-            base=pointer, shape=shape, strides=stride, block_shape=block_shape
-        )
-    pass
+# Update this to use tl.block_ptr and then use that to load using boundary conditions
+# @triton.jit
+# def make_tensor_descriptor(pointer, stride, shape, block_shape) -> tl.tensor_descriptor:
+#     if isinstance(pointer, tl.tensor_descriptor):
+#         return pointer
+#     else:
+#         return tl.make_tensor_descriptor(
+#             base=pointer, shape=shape, strides=stride, block_shape=block_shape
+#         )
+#     pass
 
 
 @triton.autotune(
@@ -48,7 +49,7 @@ def make_tensor_descriptor(pointer, stride, shape, block_shape) -> tl.tensor_des
     prune_configs_by={"block_bigger_than_size_prune": prune_invalid_configs},
 )
 @triton.jit
-def flash_attn_fwd_wrapper_kernel(
+def ema_fwd_wrapper_kernel(
     q_ptr,
     k_ptr,
     v_ptr,
@@ -172,7 +173,7 @@ def flash_attn_fwd_wrapper_kernel(
 
 
 @triton.jit
-def flash_attn_inner_kernel(
+def ema_inner_kernel(
     q_block,
     desc_k,
     desc_v,
@@ -257,7 +258,7 @@ def flash_attn_bwd_kernel():
     pass
 
 
-class FlashAttention(torch.autograd.Function):
+class ema(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v):
@@ -289,7 +290,7 @@ class FlashAttention(torch.autograd.Function):
         assert v.is_contiguous()
         assert o.is_contiguous()
 
-        flash_attn_fwd_wrapper_kernel[ctx.grid](
+        ema_fwd_wrapper_kernel[ctx.grid](
             q,
             k,
             v,
