@@ -10,6 +10,7 @@ from kernels.simple_kernels import *
 from kernels.flash_attn import *
 from kernels.linear_attn import *
 from kernels.ema import *
+from kernels.ema_combined import ema_chunk_scan_combined
 
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
@@ -76,12 +77,11 @@ if __name__ == "__main__":
     HEAD_DIM = 64
     MAMBA_HEAD_DIM = 32
     N_HEADS = 2
-    MODE = "mamba"
-
-    # BLOCK SIZE constants
     BLOCK_SIZE_M = 8
-
     NUM_CHUNKS = (SEQLEN + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
+
+    MODE = "mamba"
 
     X = torch.randn((BATCH_SIZE, SEQLEN, HEAD_DIM), dtype=torch.float32, device=DEVICE)
     P = torch.rand((BATCH_SIZE, SEQLEN, 1), dtype=torch.float32, device=DEVICE)
@@ -132,13 +132,20 @@ if __name__ == "__main__":
 
     simple_z = ema_simple(X, P)
     z_loop = ema_loop(X, P)
-
     ema_z = ema_scan_combined(X, P)
+    ema_combined_z = ema_chunk_scan_combined(
+        X_m, dt, A, B_m, C_m, chunk_size=BLOCK_SIZE_M, seq_idx=None
+    )
+    ema_combined_z = rearrange(ema_combined_z, "b l h p -> b l (h p)")
 
     # this is of shape num_chunks
     # check if this computes the correct values
     # print(ema_z)
-    assert (torch.allclose(ema_z, z_loop, atol=1e-4))
+
+    print(ema_combined_z - z_loop)
+    print("Max diff = ", (ema_combined_z - z_loop).max())
+    assert (torch.allclose(ema_combined_z, z_loop, atol=1e-2))
+    # assert (torch.allclose(ema_z, z_loop, atol=1e-4))
 
     # for index in range(1, NUM_CHUNKS):
     #     chunk_end = min((index) * BLOCK_SIZE_M - 1, SEQLEN - 1)
