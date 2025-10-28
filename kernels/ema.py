@@ -147,10 +147,10 @@ def ema_state_passing_kernel(
         prod = tl.load(prod_ptrs, mask=mask_t, other=0.0)
         sum  = tl.load(sum_ptrs, mask=mask_t, other=0.0)
 
-        
-
-
-
+        Z_new = Z_prev * prod + sum
+        # store Z_new 
+        tl.store(o_ptrs, Z_new, mask=mask_t)
+        Z_prev = Z_new
         pass
     pass
 
@@ -172,14 +172,18 @@ class EMAChunkScanCombinedFn(torch.autograd.Function):
                 triton.cdiv(x.shape[1], META['BLOCK_T']),
             )
         
+        
+        def batch_grid(META):
+            return (x.shape[0],)
+        
         batch_size = x.shape[0]
         seqlen = x.shape[1]
         head_dim = x.shape[2]
         num_chunks = (seqlen + BLOCK_T - 1) // (BLOCK_T)
 
         z = torch.zeros_like(x)
-        prod = torch.zeros((batch_size, num_chunks, head_dim), dtype=x.dtype, device=x.device)
-        sum = torch.zeros_like(prod)
+        prod = torch.zeros((batch_size, num_chunks, 1), dtype=x.dtype, device=x.device)
+        sum = torch.zeros((batch_size, num_chunks, head_dim), dtype=x.dtype, device=x.device)
 
         ctx.grid = grid
 
@@ -196,8 +200,22 @@ class EMAChunkScanCombinedFn(torch.autograd.Function):
             head_dim,
             BLOCK_T=BLOCK_T,
         )
-        out = None
-        return out
+
+        new_states = torch.zeros_like(sum)
+
+        ema_state_passing_kernel[batch_grid](
+            z, prod, sum, 
+            new_states, 
+            *stride_computer(z),
+            *stride_computer(prod),
+            *stride_computer(sum),
+            *stride_computer(new_states),
+            seqlen, 
+            head_dim, 
+            BLOCK_T=BLOCK_T
+        )
+        return new_states
+
     @staticmethod
     def backward(ctx, dout, *args):
         return None, None, None

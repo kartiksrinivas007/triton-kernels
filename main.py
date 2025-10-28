@@ -81,6 +81,8 @@ if __name__ == "__main__":
     # BLOCK SIZE constants
     BLOCK_SIZE_M = 8
 
+    NUM_CHUNKS = (SEQLEN + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+
     X = torch.randn((BATCH_SIZE, SEQLEN, HEAD_DIM), dtype=torch.float32, device=DEVICE)
     P = torch.rand((BATCH_SIZE, SEQLEN, 1), dtype=torch.float32, device= DEVICE)
     Z = torch.empty_like(X) # same shape as X, but smoothed according to P
@@ -141,5 +143,12 @@ if __name__ == "__main__":
     z_loop = ema_loop(X, P)
 
     ema_z = ema_scan_combined(X, P, BLOCK_T=BLOCK_SIZE_M)
+    
+    # this is of shape num_chunks
+    # check if this computes the correct values 
+    # print(ema_z)
 
+    for index in range(NUM_CHUNKS):
+        chunk_end = min((index + 1) * BLOCK_SIZE_M - 1, SEQLEN - 1)
+        assert torch.allclose(ema_z[:, index, :], z_loop[:, chunk_end, :], atol=1e-4), f"Mismatch at index = {index}" # type:ignore
     pass
