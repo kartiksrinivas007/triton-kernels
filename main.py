@@ -9,6 +9,7 @@ from einops import rearrange, repeat
 from kernels.simple_kernels import *
 from kernels.flash_attn import *
 from kernels.linear_attn import *
+from kernels.ema import *
 
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
@@ -77,7 +78,7 @@ if __name__ == "__main__":
     N_HEADS = 2
 
     # BLOCK SIZE constants
-    BLOCK_SIZE_M = 32
+    BLOCK_SIZE_M = 8
 
     X = torch.randn((BATCH_SIZE, SEQLEN, HEAD_DIM), dtype=torch.float32, device=DEVICE)
     P = torch.rand((BATCH_SIZE, SEQLEN, 1), dtype=torch.float32, device= DEVICE)
@@ -94,17 +95,17 @@ if __name__ == "__main__":
     C_m = torch.ones_like(B_m)
 
 
-    mamba_z = mamba_chunk_scan_combined(
-        X_m,
-        dt,
-        A,
-        B_m,
-        C_m,
-        chunk_size= BLOCK_SIZE_M,
-        seq_idx=None
-    )
+    # mamba_z = mamba_chunk_scan_combined(
+    #     X_m,
+    #     dt,
+    #     A,
+    #     B_m,
+    #     C_m,
+    #     chunk_size=BLOCK_SIZE_M,
+    #     seq_idx=None
+    # )
 
-    mamba_z = rearrange(mamba_z, "b l h p -> b l (h p)")
+    # mamba_z = rearrange(mamba_z, "b l h p -> b l (h p)")
     
     
     def ema_simple(X, P):
@@ -138,9 +139,6 @@ if __name__ == "__main__":
     simple_z = ema_simple(X, P)
     z_loop = ema_loop(X, P)
 
-    print(mamba_z - simple_z) #type:ignore 
-    print(torch.allclose(z_loop, simple_z, atol=1e-5)) # true
-
-    # why are mamba_z and simple_z so far from each other
+    ema_z = ema_scan_combined(X, P, BLOCK_T=BLOCK_SIZE_M)
 
     pass

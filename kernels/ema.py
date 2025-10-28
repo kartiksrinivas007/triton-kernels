@@ -31,288 +31,134 @@ def prune_invalid_configs(configs, named_args, **kwargs):
     return configs
 
 
-# Update this to use tl.block_ptr and then use that to load using boundary conditions
-# @triton.jit
-# def make_tensor_descriptor(pointer, stride, shape, block_shape) -> tl.tensor_descriptor:
-#     if isinstance(pointer, tl.tensor_descriptor):
-#         return pointer
-#     else:
-#         return tl.make_tensor_descriptor(
-#             base=pointer, shape=shape, strides=stride, block_shape=block_shape
-#         )
-#     pass
 
-
-@triton.autotune(
-    configs=list(filter(config_filter, configs)),
-    key=["HEAD_DIM", "seqlen", "batch_size", "num_heads"],
-    prune_configs_by={"block_bigger_than_size_prune": prune_invalid_configs},
-)
 @triton.jit
-def ema_fwd_wrapper_kernel(
-    q_ptr,
-    k_ptr,
-    v_ptr,
-    o_ptr,
-    scale,
-    # strides,
-    q_stride_b,
-    q_stride_h,
-    q_stride_n,
-    q_stride_d,
-    k_stride_b,
-    k_stride_h,
-    k_stride_n,
-    k_stride_d,
-    v_stride_b,
-    v_stride_h,
-    v_stride_n,
-    v_stride_d,
-    o_stride_b,
-    o_stride_h,
-    o_stride_n,
-    o_stride_d,
-    # SHAPES
-    batch_size,
-    seqlen,
-    num_heads,
-    # BLOCK SIZES and COMPILE TIME CONSTANTS
-    BLOCK_SIZE_M: tl.constexpr,  # For Q
-    BLOCK_SIZE_N: tl.constexpr,  # for K and V
-    HEAD_DIM: tl.constexpr,
+def ema_chunk_kernel(
+    X_ptr, P_ptr, Z_ptr,
+    prod_ptr, sum_ptr,
+    # strides for X: (B, T, D)
+    stride_xB, stride_xT, stride_xD,
+    # strides for P: (B, T, 1)
+    stride_pB, stride_pT, stride_pD,
+    # strides for Z: (B, T, D)
+    stride_zB, stride_zT, stride_zD,
+    # strides for prod: (B, C, 1)
+    stride_prodB, stride_prodC, stride_prodD,
+    # strides for sum: (B, C, D)
+    stride_sumB, stride_sumC, stride_sumD,
+    T: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_T: tl.constexpr,
 ):
+    pid_b = tl.program_id(0)       # batch index
+    pid_chunk = tl.program_id(1)   # chunk index along time
 
-    pid_m = tl.program_id(0)  # which SEQLEN block of Q am I handling
-    pid_bh = tl.program_id(1)  # which Batch and Head am I handling
-    pid_batch = pid_bh // num_heads
-    pid_head = pid_bh % num_heads
+    start_t = pid_chunk * BLOCK_T
 
-    # ---------------------------------------------------------------------
-    # Triton > 2.3.0 supports Tensor Descriptor
-    # We can use that to load tensors instead of doing offset + stride computation
-    # for things WITHIN a block (we still need to identify the block itself)
-    # ---------------------------------------------------------------------
-    # obtain the offsets of the particular Q block of interest
-    # find the ptrs to load using the strides that you have and the pid
+    # base pointers (per batch)
+    x_base = X_ptr + pid_b * stride_xB
+    p_base = P_ptr + pid_b * stride_pB
+    z_base = Z_ptr + pid_b * stride_zB
 
-    offset_batch = pid_batch
-    offset_head = pid_head
-    offset_m = pid_m
+    offs_d = tl.arange(0, D)       # vector of D offsets
+    offs_d1 = tl.arange(0, 1)      # vector of length-1 for prod block pointer
 
-    q_2d_shape = [batch_size * seqlen * num_heads, HEAD_DIM]
-    row_offset_o_block = (
-        offset_batch * seqlen * num_heads
-        + offset_head * seqlen
-        + offset_m * BLOCK_SIZE_M
-    )
+    # state
+    z = tl.zeros((D,), dtype=tl.float32)                 # vector across D
+    decay_prod = tl.full((1,), 1.0, dtype=tl.float32)    # scalar as length-1 vector
 
-    # load the Q block
-    # NOTE: Tensor Descriptor only supports stride 1 in the last dimension
-    # NOTE: This must be row-major else stride_n is not correct and may be diff
-    desc_q = make_tensor_descriptor(
-        q_ptr,
-        stride=[HEAD_DIM, 1],  # strides of that 2d block,
-        shape=q_2d_shape,
-        block_shape=[BLOCK_SIZE_M, HEAD_DIM],
-    )
+    # iterate BLOCK_T steps (masked)
+    for i in range(BLOCK_T):
+        curr_t = start_t + i
+        in_range = curr_t < T   # python bool usable as mask
 
-    # load the O block
-    desc_o = make_tensor_descriptor(
-        o_ptr,
-        stride=[HEAD_DIM, 1],
-        shape=q_2d_shape,  # the shapes are the same
-        block_shape=[BLOCK_SIZE_M, HEAD_DIM],
-    )
-    desc_k = make_tensor_descriptor(
-        k_ptr,
-        stride=[HEAD_DIM, 1],
-        shape=q_2d_shape,
-        block_shape=[BLOCK_SIZE_N, HEAD_DIM],
-    )
+        # pointers for this timestep
+        x_ptr = x_base + curr_t * stride_xT + offs_d * stride_xD   # (D,)
+        z_ptr = z_base + curr_t * stride_zT + offs_d * stride_zD   # (D,)
+        p_ptr = p_base + curr_t * stride_pT                        # scalar pointer (last dim = 1)
 
-    desc_v = make_tensor_descriptor(
-        v_ptr,
-        stride=[HEAD_DIM, 1],
-        shape=q_2d_shape,
-        block_shape=[BLOCK_SIZE_N, HEAD_DIM],
-    )
+        # masked loads
+        x = tl.load(x_ptr, mask=in_range, other=0.0)        # (D,)
+        p_scalar = tl.load(p_ptr, mask=in_range, other=0.0) # (1,)
 
-    # load Q block
-    q_block = desc_q.load([row_offset_o_block, 0])
-    # desc_o.store([row_offset_o_block, 0], tl.abs(q_block))
+        # updates (p_scalar broadcasts over D)
+        new_z = (1.0 - p_scalar) * z + p_scalar * x
+        new_decay = decay_prod * (1.0 - p_scalar)
 
-    # -----------------------------------------------------------------
-    # Flash Attention Kernel
-    # -----------------------------------------------------------------
-    # Steps
-    # Init accumulator to all zeros shape = shape of O block, same dtype
-    # 1. Loop over all values of K and V
-    #   a. Load K, V Block, and multiply with Q (Linear Attention Kernel)
-    #   b. Add the (QK^T)V to the accumulator
-    # 2. Store the accumulated result to O
-    flash_attn_inner_kernel(
-        q_block,
-        desc_k,
-        desc_v,
-        desc_o,
-        scale,
-        # offsets
-        offset_batch,
-        offset_head,
-        offset_m,
-        # sizes
-        batch_size,
-        num_heads,
-        seqlen,
-        HEAD_DIM,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-    )
+        # conditional update
+        z = tl.where(in_range, new_z, z)
+        decay_prod = tl.where(in_range, new_decay, decay_prod)
 
-    pass
+        # masked store of z
+        tl.store(z_ptr, z, mask=in_range)
+
+    # compute pointers for outputs
+    # make prod_out_ptr a length-1 block pointer so we can store the length-1 decay_prod directly
+    prod_out_ptr = prod_ptr + pid_b * stride_prodB + pid_chunk * stride_prodC + offs_d1 * stride_prodD
+    # sum_out_ptr remains a D-length block pointer
+    sum_out_ptr = sum_ptr + pid_b * stride_sumB + pid_chunk * stride_sumC + offs_d * stride_sumD
+
+    # store: decay_prod is length-1 vector, prod_out_ptr is a length-1 block pointer -> compatible
+    tl.store(prod_out_ptr, decay_prod)
+
+    # store the D-vector final z into sum_out_ptr
+    tl.store(sum_out_ptr, z)
 
 
-@triton.jit
-def ema_inner_kernel(
-    q_block,
-    desc_k,
-    desc_v,
-    desc_o,
-    scale,
-    # offsets
-    offset_batch,
-    offset_head,
-    offset_m,
-    # sizes
-    batch_size,
-    num_heads,
-    seqlen,
-    HEAD_DIM: tl.constexpr,
-    # block sizes
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-):
 
-    row_offset_o = (
-        offset_batch * seqlen * num_heads
-        + offset_head * seqlen
-        + offset_m * BLOCK_SIZE_M
-    )
-
-    LOG2E = 1.4426950489
-
-    acc = tl.zeros((BLOCK_SIZE_M, HEAD_DIM), dtype=tl.float32)
-    running_max = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
-    running_exp_sum_neg_max = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
-
-    for kv_index in tl.range(0, seqlen, BLOCK_SIZE_N):  # type: ignore
-
-        # The kv_index is the row that needs to be loaded
-        row_offset_k = (
-            offset_batch * seqlen * num_heads + offset_head * seqlen + kv_index
-        )
-        k_block = desc_k.load([row_offset_k, 0])
-        v_block = desc_v.load([row_offset_k, 0])
-
-        # k_block = tl.load(desc_k, (row_offset_k, 0), boundary_check=True, padding_option="zero")
-        # v_block = tl.load(desc_v, (row_offset_k, 0), boundary_check=True, padding_option="zero")
-
-        qk_t = tl.dot(q_block, k_block.T) * scale
-        max_qk_t = tl.max(qk_t, axis=1, keep_dims=True)
-        qk_t = (qk_t - max_qk_t).to(tl.float32)
-        present_exp_sum_neg_max = tl.sum(
-            tl.exp2(LOG2E * qk_t), axis=1, keep_dims=True
-        ).to(tl.float32)
-
-        # update the running variables
-
-        running_max_updated = tl.maximum(max_qk_t, running_max)
-        running_exp_sum_neg_max_updated = present_exp_sum_neg_max * tl.exp(
-            max_qk_t - running_max_updated
-        ) + running_exp_sum_neg_max * tl.exp(running_max - running_max_updated)
-
-        # correct for exp subtraction
-        qk_t = qk_t + max_qk_t - running_max_updated
-        attn_kernel = (tl.exp2(LOG2E * qk_t) / running_exp_sum_neg_max_updated).to(
-            tl.float32
-        )
-        attn_kernel = tl.dot(attn_kernel, v_block)
-        acc = (
-            attn_kernel
-            + acc
-            * tl.exp(running_max - running_max_updated)
-            * running_exp_sum_neg_max
-            / running_exp_sum_neg_max_updated
-        )
-
-        running_max = running_max_updated
-        running_exp_sum_neg_max = running_exp_sum_neg_max_updated
-
-    # store acc in appropriate block of o
-    desc_o.store([row_offset_o, 0], acc)
-    pass
-
-
-@triton.jit
-def flash_attn_bwd_kernel():
-    pass
-
-
-class ema(torch.autograd.Function):
+class EMAChunkScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v):
+    def forward(ctx, x, p, BLOCK_T=8):
 
-        # Descriptors need to be allocated in global memory (is this expensive?)
-        def alloc_fn(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
-            return torch.empty(size, dtype=torch.int8, device="cuda")
-
-        triton.set_allocator(alloc_fn)
-
-        # create variables
-        o = torch.empty_like(q)  # make it the same shape as q
-        scale = 1 / np.sqrt(q.shape[-1])
+        
+        ctx.dt_dtype = x.dtype
 
         def stride_computer(tensor: torch.Tensor):
             return tuple(tensor.stride(index) for index in range(len(tensor.shape)))
 
         def grid(META):
             return (
-                triton.cdiv(q.shape[2], META["BLOCK_SIZE_M"]),
-                q.shape[0] * q.shape[1],
-                1,
+                x.shape[0], # batch size,
+                triton.cdiv(x.shape[1], META['BLOCK_T']),
             )
+        
+        batch_size = x.shape[0]
+        seqlen = x.shape[1]
+        head_dim = x.shape[2]
+        num_chunks = (seqlen + BLOCK_T - 1) // (BLOCK_T)
+
+        z = torch.zeros_like(x)
+        prod = torch.zeros((batch_size, num_chunks, head_dim), dtype=x.dtype, device=x.device)
+        sum = torch.zeros_like(prod)
 
         ctx.grid = grid
 
-        assert q.is_contiguous()
-        assert k.is_contiguous()
-        assert v.is_contiguous()
-        assert o.is_contiguous()
 
-        ema_fwd_wrapper_kernel[ctx.grid](
-            q,
-            k,
-            v,
-            o,
-            scale,
-            # strides,
-            *stride_computer(q),
-            *stride_computer(k),
-            *stride_computer(v),
-            *stride_computer(o),
-            # shapes
-            batch_size=q.shape[0],
-            num_heads=q.shape[1],
-            seqlen=q.shape[2],
-            HEAD_DIM=q.shape[-1]
-            # you need not specify block sizes since that
-            # is handled by the triton autotuner
+        ema_chunk_kernel[grid](
+            x, p, z,
+            prod, sum, 
+            *stride_computer(x),
+            *stride_computer(p),
+            *stride_computer(z),
+            *stride_computer(prod),
+            *stride_computer(sum),
+            seqlen,
+            head_dim,
+            BLOCK_T=BLOCK_T,
         )
-        return o
-
+        out = None
+        return out
     @staticmethod
-    def backward(ctx, do):
+    def backward(ctx, dout, *args):
         return None, None, None
 
-    pass
+
+
+def ema_scan_combined(x, p, BLOCK_T):
+
+    assert x.is_contiguous()
+    assert p.is_contiguous()
+
+    return EMAChunkScanCombinedFn.apply(x, p, BLOCK_T)
+
