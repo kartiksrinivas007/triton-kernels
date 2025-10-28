@@ -84,8 +84,10 @@ if __name__ == "__main__":
     Z = torch.empty_like(X) # same shape as X, but smoothed according to P
 
     # X needs to be broken into a bunch of heads and the head_dim 
-    X_m = rearrange(X, "b l (h p) -> b l h p", p=MAMBA_HEAD_DIM)
+
     dt = -torch.log(1-P).to(torch.float32).squeeze(-1)
+    X_beta = (X / dt[..., None])
+    X_m = rearrange(X_beta, "b l (h p) -> b l h p", p=MAMBA_HEAD_DIM)
     dt = repeat(dt, "b l -> b l h", h=N_HEADS)
     A = -1*torch.ones(N_HEADS, dtype=torch.float32, device=DEVICE)
     B_m = rearrange(P.to(torch.float32), "b l 1 -> b l 1 1")
