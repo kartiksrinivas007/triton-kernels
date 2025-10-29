@@ -9,7 +9,8 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from einops import rearrange, repeat
 
 
-MAMBA_NUM_HEADS = 8
+MAMBA_NUM_HEADS = 1
+MAMBA_CHUNK_SIZE = 256
 
 def ema_simple(X, P):
 
@@ -56,7 +57,7 @@ for head_dim in [64, 128, 256]:
                     "BATCH": batch_size,
                     "HEAD_DIM": head_dim,
                     "MAMBA_HEAD_DIM": head_dim / MAMBA_NUM_HEADS, # use 2 heads
-                    "MAMBA_CHUNK_SIZE": 128,
+                    "MAMBA_CHUNK_SIZE": MAMBA_CHUNK_SIZE,
                     "device": "cuda",
                     
                 },

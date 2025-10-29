@@ -2,7 +2,7 @@
 import torch
 from einops import rearrange, repeat
 
-from kernels.ema_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd, chunk_state_varlen
+from kernels.ema_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd, chunk_state_varlen, _simplified_chunk_state_fwd
 from kernels.ema_state_passing import _state_passing_fwd
 from kernels.ema_bmm import _bmm_chunk_fwd
 from kernels.ema_chunk_scan import _chunk_scan_fwd
@@ -41,7 +41,7 @@ def _ema_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_
     # dA_cumsum_tmp1, dt_tmp1 = _chunk_cumsum_fwd(dt[:, 147:], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
     # dA_cumsum_tmp2, dt_tmp2 = _chunk_cumsum_fwd(dt[:, 147:256], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
     dA_cumsum, dt = _chunk_cumsum_fwd(dt, A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus, dt_limit=dt_limit)
-    states = _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
+    states = _simplified_chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
     # states_tmp0 = _chunk_state_fwd(B[:, :147], x[:, :147], dt_tmp0, dA_cumsum_tmp0, states_in_fp32=True)
     # states_tmp1 = _chunk_state_fwd(B[:, 147:], x[:, 147:], dt_tmp1, dA_cumsum_tmp1, states_in_fp32=True)
     # states_tmp2 = _chunk_state_fwd(B[:, 147:256], x[:, 147:256], dt_tmp2, dA_cumsum_tmp2, states_in_fp32=True)
