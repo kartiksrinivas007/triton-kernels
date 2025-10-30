@@ -55,9 +55,11 @@ def _state_passing_fwd_kernel(
     else:
         initstates_ptrs = initstates_ptr + offs_m * stride_initstates_dim
         states = tl.load(initstates_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
+    # stores the initial state and moves forward
     tl.store(out_ptrs, states, mask=offs_m < dim)
     out_ptrs += stride_out_chunk
     seq_idx = 0
+
     for c in range(nchunks):
         new_states = tl.load(states_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
@@ -77,6 +79,7 @@ def _state_passing_fwd_kernel(
 
 
 
+# Why flatten and go forward when you can load a block of each dimension in head-dim and d_state?
 def _state_passing_fwd(states, dA_chunk_cumsum, initial_states=None, seq_idx=None, chunk_size=None,
                        out_dtype=None):
     batch, nchunks, nheads, dim = states.shape
@@ -87,6 +90,8 @@ def _state_passing_fwd(states, dA_chunk_cumsum, initial_states=None, seq_idx=Non
         assert chunk_size is not None
         seqlen = seq_idx.shape[-1]
         assert seq_idx.shape == (batch, seqlen)
+    
+    #TODO(kartiksrinivas): Occupancy optimizations because the d_state = 1, the blocks can me made larger
     out_dtype = states.dtype if out_dtype is None else out_dtype
     out = torch.empty((batch, nchunks, nheads, dim), device=states.device, dtype=out_dtype)
     final_states = torch.empty((batch, nheads, dim), device=states.device, dtype=torch.float32)

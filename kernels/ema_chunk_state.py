@@ -257,6 +257,7 @@ def _chunk_state_fwd_kernel(
     c_mask = (offs_m[:, None] < hdim) & (offs_n[None, :] < dstate)
     tl.store(states_ptrs, states, mask=c_mask)
 
+#TODO(kartiksrinivas): Measure and improve the occupancy here, since the blocking over N is not done 
 chunk_state_fwd_configs = [
         triton.Config({'BLOCK_SIZE_M': 128,  'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
         triton.Config({'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
@@ -402,7 +403,10 @@ def _simplified_chunk_state_fwd_kernel(
 
     states_ptr += pid_b * stride_states_batch + pid_c * stride_states_chunk + pid_h * stride_states_head
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    # ----------------------- OPTIMIZATION ----------------------
     offs_n = tl.arange(0, 1)
+    #offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # ----------------------- OPTIMIZATION ----------------------
     states_ptrs = states_ptr + (offs_m[:, None] * stride_states_hdim + offs_n[None, :] * stride_states_dstate)
     c_mask = (offs_m[:, None] < hdim) & (offs_n[None, :] < dstate)
     tl.store(states_ptrs, states, mask=c_mask)

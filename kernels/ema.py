@@ -1,5 +1,8 @@
 """
 Copyright (c) 2025, Kartik Srinivas
+
+This is a parallel prefix scan kernel implementation of an 
+exponential moving average.
 """
 
 import triton

@@ -7,6 +7,7 @@ from packaging import version
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
+#TODO(kartiksrinivas): Blocking over d_state is unecessary, occupancy can be improved
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
