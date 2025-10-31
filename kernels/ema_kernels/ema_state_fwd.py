@@ -47,7 +47,8 @@ def _ema_chunk_state_fwd_kernel(
     BLOCK_SIZE_T: tl.constexpr,
 ):
     """ 
-    A chunked - Batch Matrix multiply kernel.
+    A chunked - Batch Matrix multiply kernel with 
+    specific forms of scaling
     X : B, L, T  = B, C , Q, T
     A_cs : B, C, Q
 
@@ -56,33 +57,28 @@ def _ema_chunk_state_fwd_kernel(
     States: B, Q, T
 
     """
-    pid_bc = tl.program_id(axis=2)
+    pid_bc = tl.program_id(axis=1)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
-    pid_q = tl.program_id(axis = 0)
-    pid_t = tl.program_id(axis = 1)
-
+    pid_t = tl.program_id(axis = 0)
 
 
     # token_dim offset for the BMM
     offs_t = pid_t * BLOCK_SIZE_T + tl.arange(0, BLOCK_SIZE_T)
     #starting offset for q
-    offs_q  = pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
+    offs_q  = tl.arange(0, BLOCK_SIZE_Q)
     # offset along sequence length dimension, needs contiguity between C and Q
     offs_seqlen = pid_c * chunk_size + offs_q
     # base pointer to A_cumsum_ptr
     A_cumsum_ptrs = A_cumsum_ptr + pid_b * stride_A_cs_batch + pid_c * stride_A_cs_chunk + offs_q * stride_A_cs_csize
-
-    
     # base pointer to X
     x_ptrs = x_ptr + pid_b * stride_x_batch + offs_seqlen[None, :] * stride_x_seqlen + offs_t[:, None] * stride_x_token_dim
     # The limit till which I should fill
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
 
     # last factor in chunk 
-    A_cumsum_last_ptr = A_cumsum_ptr + pid_b * stride_A_cs_batch + pid_c * stride_A_cs_chunk + (chunk_size - 1) * stride_A_cs_csize
+    A_cumsum_last_ptr = A_cumsum_ptr + pid_b * stride_A_cs_batch + pid_c * stride_A_cs_chunk + (chunk_size_limit - 1) * stride_A_cs_csize
     a_last = tl.load(A_cumsum_last_ptr).to(tl.float32)
-
 
     acc = tl.zeros((BLOCK_SIZE_T, 1), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_Q):
@@ -94,9 +90,10 @@ def _ema_chunk_state_fwd_kernel(
         a = tl.load(A_cumsum_ptrs, mask=(offs_q < chunk_size_limit - k), other=0.0).to(tl.float32)
 
         # BLOCK_SIZE_Q
-        scale = tl.exp(tl.minimum((a_last - a), 0.0))
+        scale = tl.exp(tl.minimum(a_last - a, 0.0))
 
         scale = scale.to(x_ptr.dtype.element_ty)
+        # scale = tl.zeros((BLOCK_SIZE_Q, ), dtype=tl.float32) + 1.0
 
         # (BLOCK_SIZE_M, BLOCK_SIZE_N)
         acc += tl.dot(x, scale[:, None])
@@ -126,8 +123,7 @@ def _ema_chunk_state_fwd(x, A_cumsum, seq_idx=None, states=None, states_in_fp32=
     else:
         states_dtype = torch.float32 if states_in_fp32 else x.dtype
         states = torch.empty((batch, nchunks, token_dim), device=x.device, dtype=states_dtype)
-    grid = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_Q']),
-                    triton.cdiv(token_dim, META['BLOCK_SIZE_T']), batch*nchunks)
+    grid = lambda META: (triton.cdiv(token_dim, META['BLOCK_SIZE_T']), batch*nchunks)
 
     with torch.cuda.device(x.device.index):
         _ema_chunk_state_fwd_kernel[grid](

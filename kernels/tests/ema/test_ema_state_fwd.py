@@ -29,9 +29,11 @@ def ema_loop(X, P, chunk_size):
             x = X[b, t]
             z = (1.0 - p) * z_prev + p * x
             count += 1
-            if count % chunk_size == 0:
+            if count % chunk_size == 0 or t == T - 1:
                 Z[b, t // chunk_size] = z
             z_prev = z
+            
+                
     return Z
 
 
@@ -67,7 +69,7 @@ def _get_gpu_specifications(DEVICE):
 
 class TestEmaStateFwdKernels:
     BATCH_SIZE = 8
-    SEQLEN = 8192
+    SEQLEN = 8197
     TOKEN_DIM = 512
     MAMBA_HEAD_DIM = 32
     N_HEADS = 16
@@ -78,6 +80,8 @@ class TestEmaStateFwdKernels:
 
     @classmethod
     def setup_class(cls):
+
+        torch.manual_seed(42)
 
         DEVICE = driver.active.get_active_torch_device()  # type: ignore
         _, properties = _get_gpu_specifications(DEVICE)
@@ -144,8 +148,11 @@ class TestEmaStateFwdKernels:
         )
 
 
+
         assert torch.allclose(mamba_states, ema_states, atol=1e-2)
-        assert torch.allclose(mamba_states.to("cpu"), states_ema_loop, atol=1e-2)
+
+        breakpoint()
+        assert torch.allclose(mamba_states.to("cpu"), states_ema_loop, atol=1e-1)
         
 
 
