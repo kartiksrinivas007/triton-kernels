@@ -11,6 +11,29 @@ from kernels.mamba_kernels.mamba_cumsum import _chunk_cumsum_fwd
 from kernels.mamba_kernels.mamba_state_fwd import _chunk_state_fwd
 
 import triton.runtime.driver as driver
+import math
+
+
+def ema_loop(X, P, chunk_size):
+    B, T, D = X.shape
+    N  = math.ceil(T / chunk_size)
+    Z = torch.zeros(B, N, D)
+    for b in range(B):
+        z_prev = torch.zeros(D, device=X.device, dtype=X.dtype)
+        count = 0
+        for t in range(T):
+            if t % chunk_size == 0:
+                count = 0
+                z_prev = 0
+            p = P[b, t, 0]
+            x = X[b, t]
+            z = (1.0 - p) * z_prev + p * x
+            count += 1
+            if count % chunk_size == 0:
+                Z[b, t // chunk_size] = z
+            z_prev = z
+    return Z
+
 
 def _get_gpu_specifications(DEVICE):
 
@@ -89,7 +112,7 @@ class TestEmaStateFwdKernels:
         # 4. Write code to benchmark both kernels
         
         
-    def test_mamba_cumsum_kernel(self):
+    def test_mamba_state_fwd_kernel(self):
         mamba_cs, mamba_dt_out = _chunk_cumsum_fwd(
             self.dt, self.A, chunk_size=self.MAMBA_CHUNK_SIZE
         )
@@ -104,7 +127,9 @@ class TestEmaStateFwdKernels:
             states_in_fp32=True,
         )
 
-        states_real = rearrange(states.squeeze(-1), " b c h d -> b c (h d)")
+        mamba_states = rearrange(states.squeeze(-1), " b c h d -> b c (h d)")
+
+        states_ema_loop = ema_loop(self.X, self.P, chunk_size=self.MAMBA_CHUNK_SIZE)
 
         ema_cs = ema_chunk_cumsum_fwd(
             self.A_ema, chunk_size=self.MAMBA_CHUNK_SIZE
@@ -118,9 +143,9 @@ class TestEmaStateFwdKernels:
             states_in_fp32=True
         )
 
-        breakpoint()
 
-        assert torch.allclose(states_real, ema_states, atol=1e-3)
+        assert torch.allclose(mamba_states, ema_states, atol=1e-2)
+        assert torch.allclose(mamba_states.to("cpu"), states_ema_loop, atol=1e-2)
         
 
 

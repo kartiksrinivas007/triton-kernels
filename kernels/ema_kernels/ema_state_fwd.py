@@ -80,7 +80,7 @@ def _ema_chunk_state_fwd_kernel(
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
 
     # last factor in chunk 
-    A_cumsum_last_ptr = A_cumsum_ptr + pid_b * stride_A_cs_batch + pid_c * stride_A_cs_chunk + (chunk_size_limit - 1) * stride_A_cs_csize
+    A_cumsum_last_ptr = A_cumsum_ptr + pid_b * stride_A_cs_batch + pid_c * stride_A_cs_chunk + (chunk_size - 1) * stride_A_cs_csize
     a_last = tl.load(A_cumsum_last_ptr).to(tl.float32)
 
 
@@ -96,11 +96,10 @@ def _ema_chunk_state_fwd_kernel(
         # BLOCK_SIZE_Q
         scale = tl.exp(tl.minimum((a_last - a), 0.0))
 
-        a *= scale
-        a = a.to(x_ptr.dtype.element_ty)
+        scale = scale.to(x_ptr.dtype.element_ty)
 
         # (BLOCK_SIZE_M, BLOCK_SIZE_N)
-        acc += tl.dot(x, a[:, None])
+        acc += tl.dot(x, scale[:, None])
 
         # update pointers
         x_ptrs += BLOCK_SIZE_Q * stride_x_seqlen
