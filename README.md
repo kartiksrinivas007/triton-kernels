@@ -3,11 +3,13 @@
 ---
 The directory structure is as follows `kernels` is the head level module
 ```
+├── README.md
 ├── kernels
 │   ├── __init__.py
 │   ├── benchmarks
 │   │   ├── ema
 │   │   ├── ema_bench.py
+│   │   ├── ema_scan
 │   │   ├── flash_bench.py
 │   │   ├── linear_bench.py
 │   │   ├── outputs_ema_scan
@@ -18,20 +20,24 @@ The directory structure is as follows `kernels` is the head level module
 │   ├── ema_chunk_state.py
 │   ├── ema_combined.py
 │   ├── ema_kernels
-│   │   └── ema_cumsum.py
+│   │   ├── ema_cumsum.py
+│   │   └── ema_state_fwd.py
 │   ├── ema_state_passing.py
 │   ├── flash_attn.py
 │   ├── layer_norm.py
 │   ├── linear_attn.py
 │   ├── mamba_kernels
-│   │   └── mamba_cumsum.py
+│   │   ├── mamba_cumsum.py
+│   │   └── mamba_state_fwd.py
 │   ├── matmul.py
 │   ├── simple_kernels.py
 │   └── tests
 │       ├── __init__.py
 │       ├── ema
 │       └── test_basic.py
-└── main.py
+├── main.py
+└── mamba_env.yml
+
 ```
 
 To see the simple parallel prefix scan implementation of ema kernel, 
@@ -52,11 +58,15 @@ python -m kernels.benchmarks.ema.cumsum.cumsum_bench
 ```
 
 
-To run a test 
-
+To run all ema kernel tests
 
 ```
-python -m pytest -v kernels/tests/ema/test_ema_cumsum.py 
+python -m pytest -v kernels/tests/ema/
+```
+
+To run older tests on basic kernels.
+
+```
 python -m pytest -v kernels/tests/test_basic.py
 ```
 
