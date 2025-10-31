@@ -41,7 +41,7 @@ def _get_gpu_specifications(DEVICE):
 
 class TestEmaCumsumKernels:
     BATCH_SIZE = 8
-    SEQLEN = 8192
+    SEQLEN = 8197
     HEAD_DIM = 512
     MAMBA_HEAD_DIM = 32
     N_HEADS = 16
