@@ -7,109 +7,103 @@ import triton.language as tl
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 64}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-        triton.Config({'BLOCK_SIZE': 1024}),
-        triton.Config({'BLOCK_SIZE': 2048}),
+        triton.Config({'BLOCK_SIZE_T': 64}),
+        triton.Config({'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_T': 256}),
+        triton.Config({'BLOCK_SIZE_T': 512}),
     ],
     key=['dim'],
 )
 @triton.jit
 def _ema_state_passing_fwd_kernel(
     # Pointers to matrices
-    states_ptr, out_ptr, final_states_ptr, dA_cs_ptr, initstates_ptr, seq_idx_ptr,
+    states_ptr, out_ptr, final_states_ptr, A_cs_last_ptr, initstates_ptr,
     # Matrix dimensions
-    dim, nchunks, seqlen, chunk_size,
+    token_dim, nchunks, batch,
     # Strides
-    stride_states_batch, stride_states_chunk, stride_states_head, stride_states_dim,
-    stride_out_batch, stride_out_chunk, stride_out_head, stride_out_dim,
-    stride_final_states_batch, stride_final_states_head, stride_final_states_dim,
-    stride_dA_cs_batch, stride_dA_cs_chunk, stride_dA_cs_head,
-    stride_initstates_batch, stride_initstates_head, stride_initstates_dim,
-    stride_seq_idx_batch, stride_seq_idx_seqlen,
+    stride_states_batch, stride_states_chunk, stride_states_token_dim,
+    stride_out_batch, stride_out_chunk, stride_out_token_dim,
+    stride_final_states_batch, stride_final_states_token_dim,
+    stride_A_cs_last_batch, stride_A_cs_last_chunk,
     # Meta-parameters
-    HAS_INITSTATES: tl.constexpr,
-    HAS_SEQ_IDX: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    BLOCK_SIZE_B: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
 ):
+    """Compute EMA over the states acorss chunks themselves.
+    acc = all zeroes
+    out.store(acc)
+    for chunk in chunks:
+        new_state = load internal final state of chunk 
+        decay = load decay of present chunk
+        acc(newer value of new chunk start) = new_state + decay * acc (older value of old chunk start)
+        out.store(acc)
+    """
+
     pid_b = tl.program_id(axis=1)
-    pid_h = tl.program_id(axis=2)
-    pid_m = tl.program_id(axis=0)
-    states_ptr += pid_b * stride_states_batch + pid_h * stride_states_head
-    dA_cs_ptr += pid_b * stride_dA_cs_batch + pid_h * stride_dA_cs_head
-    out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
-    final_states_ptr += pid_b * stride_final_states_batch + pid_h * stride_final_states_head
-    if HAS_INITSTATES:
-        initstates_ptr += pid_b * stride_initstates_batch + pid_h * stride_initstates_head
-    if HAS_SEQ_IDX:
-        seq_idx_ptr += pid_b * stride_seq_idx_batch
+    pid_t = tl.program_id(axis=0)
 
-    offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    states_ptrs = states_ptr + offs_m * stride_states_dim
-    out_ptrs = out_ptr + offs_m * stride_out_dim
-    final_states_ptrs = final_states_ptr + offs_m * stride_final_states_dim
+    offs_b = pid_b * BLOCK_SIZE_B + tl.arange(0, BLOCK_SIZE_B)
+    offs_t = pid_t * BLOCK_SIZE_T + tl.arange(0, BLOCK_SIZE_T)
 
-    if not HAS_INITSTATES:
-        states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
-    else:
-        initstates_ptrs = initstates_ptr + offs_m * stride_initstates_dim
-        states = tl.load(initstates_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
+    # Compute base pointers (no chunk movement)
+    states_ptrs = states_ptr + offs_b[:, None] * stride_states_batch + offs_t[None, :] * stride_states_token_dim
+    A_cs_last_ptrs = A_cs_last_ptr + offs_b[:, None] * stride_A_cs_last_batch
+    out_ptrs = out_ptr + offs_b[:, None] * stride_out_batch + offs_t[None, :] * stride_out_token_dim
+
+    # Compute final position pointer
+    final_states_ptrs = final_states_ptr + offs_b[:, None] * stride_final_states_batch + offs_t[None, :] * stride_final_states_token_dim
+
+    # main mask to check for the batch sizes and the token sizes, chunks are within limit by definition (for loop)
+    bt_mask  = (offs_b[:, None] < batch) & (offs_t[None, :] < token_dim)
+
+
+
+    acc = tl.zeros((BLOCK_SIZE_B, BLOCK_SIZE_T), dtype=tl.float32)
+
     # stores the initial state and moves forward
-    tl.store(out_ptrs, states, mask=offs_m < dim)
+    tl.store(out_ptrs, acc , mask=bt_mask)
+    # move a single chunk forward
     out_ptrs += stride_out_chunk
-    seq_idx = 0
 
+    # TODO(kartiksrinivas) : pipelining in the loop?
     for c in range(nchunks):
-        new_states = tl.load(states_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
-        dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
-        scale = tl.exp(dA_cs)
-        if HAS_SEQ_IDX:
-            seq_idx_new = tl.load(seq_idx_ptr + (min((c + 1) * chunk_size, seqlen) - 1) * stride_seq_idx_seqlen)
-            scale = tl.where(seq_idx_new == seq_idx, scale, 0.0)
-            seq_idx = seq_idx_new
-        states = scale * states + new_states
+        final_states = tl.load(states_ptrs, mask=bt_mask, other=0.0).to(tl.float32)
+        A_cs_last = tl.load(A_cs_last_ptrs, mask = offs_b < batch, other=0.0).to(tl.float32)
+        scale = tl.exp(A_cs_last)
+        acc = scale * acc + final_states
         if c < nchunks - 1:
-            tl.store(out_ptrs, states, mask=offs_m < dim)
+            tl.store(out_ptrs, acc, mask=bt_mask)
         else:
-            tl.store(final_states_ptrs, states, mask=offs_m < dim)
+            tl.store(final_states_ptrs, acc, mask=bt_mask)
+
         states_ptrs += stride_states_chunk
-        dA_cs_ptr += stride_dA_cs_chunk
+        A_cs_last_ptrs += stride_A_cs_last_chunk
         out_ptrs += stride_out_chunk
 
 
 
 # Why flatten and go forward when you can load a block of each dimension in head-dim and d_state?
-def _ema_state_passing_fwd(states, dA_chunk_cumsum_last, initial_states=None, seq_idx=None, chunk_size=None,
+def _ema_state_passing_fwd(states : torch.Tensor, A_cs_last : torch.Tensor , initial_states=None, chunk_size=None,
                        out_dtype=None):
     batch, nchunks, token_dim = states.shape
-    assert dA_chunk_cumsum.shape == (batch, nchunks)
+    assert A_cs_last.shape == (batch, nchunks)
     if initial_states is not None:
-        assert initial_states.shape == (batch, nheads, dim)
-    if seq_idx is not None:
-        assert chunk_size is not None
-        seqlen = seq_idx.shape[-1]
-        assert seq_idx.shape == (batch, seqlen)
-    
-    #TODO(kartiksrinivas): Occupancy optimizations because the d_state = 1, the blocks can me made larger
+        raise NotImplementedError("No support for init_states in EMA kernel.")
+
     out_dtype = states.dtype if out_dtype is None else out_dtype
-    out = torch.empty((batch, nchunks, nheads, dim), device=states.device, dtype=out_dtype)
-    final_states = torch.empty((batch, nheads, dim), device=states.device, dtype=torch.float32)
-    grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE']), batch, nheads)
+    out = torch.empty((batch, nchunks, token_dim), device=states.device, dtype=out_dtype) # one start state per chunk
+    final_states = torch.empty((batch, token_dim), device=states.device, dtype=torch.float32) # one final state per batch example
+    grid = lambda META: (triton.cdiv(token_dim, META['BLOCK_SIZE_T']), triton.cdiv(batch, META['BLOCK_SIZE_B']))
+
     with torch.cuda.device(states.device.index):
         _ema_state_passing_fwd_kernel[grid](
-            states, out, final_states, dA_chunk_cumsum, initial_states, seq_idx,
-            dim, nchunks, seqlen if seq_idx is not None else 0, chunk_size if seq_idx is not None else 0,
-            states.stride(0), states.stride(1), states.stride(2), states.stride(3),
-            out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-            final_states.stride(0), final_states.stride(1), final_states.stride(2),
-            dA_chunk_cumsum.stride(0), dA_chunk_cumsum.stride(2), dA_chunk_cumsum.stride(1),
-            *((initial_states.stride(0), initial_states.stride(1), initial_states.stride(2))
-              if initial_states is not None else (0, 0, 0)),
-            *((seq_idx.stride(0), seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
-            HAS_INITSTATES=initial_states is not None,
-            HAS_SEQ_IDX=seq_idx is not None,
+            states, out, final_states, A_cs_last, initial_states,
+            token_dim, nchunks, batch ,
+            states.stride(0), states.stride(1), states.stride(2),
+            out.stride(0), out.stride(1), out.stride(2),
+            final_states.stride(0), final_states.stride(1),
+            A_cs_last.stride(0), A_cs_last.stride(1),
+            BLOCK_SIZE_B = 1 # no blocking  over batch for now
         )
     return out, final_states
 

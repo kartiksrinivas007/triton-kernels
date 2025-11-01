@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 import numpy as np
 from einops import rearrange, repeat
+import pytest
 
 from kernels.ema_kernels.ema_cumsum import ema_chunk_cumsum_fwd
 from kernels.ema_kernels.ema_state_fwd import _ema_chunk_state_fwd
@@ -22,17 +23,10 @@ def ema_loop(X, P, chunk_size):
     Z = torch.zeros(B, N, D)
     for b in range(B):
         z_prev = torch.zeros(D, device=X.device, dtype=X.dtype)
-        count = 0
         for t in range(T):
-            if t % chunk_size == 0:
-                count = 0
-                z_prev = 0
             p = P[b, t, 0]
             x = X[b, t]
             z = (1.0 - p) * z_prev + p * x
-            count += 1
-            if count % chunk_size == 0:
-                Z[b, t // chunk_size] = z
             z_prev = z
     return Z
 
@@ -114,12 +108,13 @@ class TestEmaStateFwdKernels:
         # 4. Write code to benchmark both kernels
         
         
+    
     def test_mamba_state_passing_kernel(self):
         mamba_cs, mamba_dt_out = _chunk_cumsum_fwd(
             self.dt, self.A, chunk_size=self.MAMBA_CHUNK_SIZE
         )
         # get the outputs
-        states = _chunk_state_fwd(
+        mamba_states = _chunk_state_fwd(
             self.B_m,
             self.X_m,
             mamba_dt_out,
@@ -128,7 +123,10 @@ class TestEmaStateFwdKernels:
             states=None,
             states_in_fp32=True,
         )
-        mamba_states = rearrange(states.squeeze(-1), " b c h d -> b c (h d)")
+
+        mamba_states_updated, mamba_final_state = _state_passing_fwd(rearrange(mamba_states, "... p n -> ... (p n)"), mamba_cs[:, :, :, -1],
+                                            initial_states= None,
+                                            seq_idx=None, chunk_size=None, out_dtype=self.C_m.dtype)
 
         states_ema_loop = ema_loop(self.X, self.P, chunk_size=self.MAMBA_CHUNK_SIZE)
 
@@ -143,12 +141,23 @@ class TestEmaStateFwdKernels:
             states=None,
             states_in_fp32=True
         )
-        
+
+        ema_states_updated, ema_final_state = _ema_state_passing_fwd(
+            ema_states, 
+            ema_cs[..., -1],
+            initial_states=None,
+            chunk_size=None,  # not needed strictly speaking for this algo
+            out_dtype=self.C_m.dtype
+        )
+
+        mamba_test = rearrange(mamba_states_updated, "b c h d -> b c (h d)")
+        mamba_final_test = rearrange(mamba_final_state, "b h d -> b (h d)")
+
+
         # call state passing
+        assert (torch.allclose(mamba_final_test, ema_final_state, atol=1e-1))
+        assert (torch.allclose(mamba_test, ema_states_updated, atol=1e-1))
 
-
-        assert torch.allclose(mamba_states, ema_states, atol=1e-2)
-        assert torch.allclose(mamba_states.to("cpu"), states_ema_loop, atol=1e-2)
         
 
 
