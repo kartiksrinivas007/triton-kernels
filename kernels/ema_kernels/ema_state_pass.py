@@ -5,14 +5,18 @@ import math
 import triton.language as tl
 
 
+# TODO(kartiksrinivas): Add a pruner, for BLOCK_SIZE_T < token_dim
+# TODO(kartiksrinivas): Check correctness with "python -m pytest -v kernels/tests/ema/test_ema_state_pass.py --count=5  --randomly-seed=400244919"
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_T': 64}),
         triton.Config({'BLOCK_SIZE_T': 128}),
         triton.Config({'BLOCK_SIZE_T': 256}),
         triton.Config({'BLOCK_SIZE_T': 512}),
+        # triton.Config({'BLOCK_SIZE_T': 1024}), -- causes bugs! its bigger than token_dim
+        # triton.Config({'BLOCK_SIZE_T': 2048}),
     ],
-    key=['dim'],
+    key=['token_dim'],
 )
 @triton.jit
 def _ema_state_passing_fwd_kernel(
@@ -47,7 +51,7 @@ def _ema_state_passing_fwd_kernel(
 
     # Compute base pointers (no chunk movement)
     states_ptrs = states_ptr + offs_b[:, None] * stride_states_batch + offs_t[None, :] * stride_states_token_dim
-    A_cs_last_ptrs = A_cs_last_ptr + offs_b[:, None] * stride_A_cs_last_batch
+    A_cs_last_ptrs = A_cs_last_ptr + offs_b * stride_A_cs_last_batch
     out_ptrs = out_ptr + offs_b[:, None] * stride_out_batch + offs_t[None, :] * stride_out_token_dim
 
     # Compute final position pointer
