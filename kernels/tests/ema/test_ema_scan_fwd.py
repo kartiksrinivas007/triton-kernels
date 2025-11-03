@@ -31,6 +31,7 @@ def ema_loop(X, P):
             x = X[b, t]
             z = (1.0 - p) * z_prev + p * x
             z_prev = z
+            Z[b, t, :] = z
     return Z
 
 
@@ -65,7 +66,7 @@ def _get_gpu_specifications(DEVICE):
     return DEVICE, properties
 
 class TestEmaStateFwdKernels:
-    BATCH_SIZE = 8
+    BATCH_SIZE = 4
     SEQLEN = 8192
     TOKEN_DIM = 512
     MAMBA_HEAD_DIM = 32
@@ -112,7 +113,7 @@ class TestEmaStateFwdKernels:
         
         
     
-    def test_mamba_state_passing_kernel(self):
+    def test_mamba_scan_fwd_kernel(self):
         mamba_cs, mamba_dt_out = _chunk_cumsum_fwd(
             self.dt, self.A, chunk_size=self.MAMBA_CHUNK_SIZE
         )
@@ -162,11 +163,10 @@ class TestEmaStateFwdKernels:
 
         mamba_test = rearrange(mamba_out,"b s h d -> b s (h d)")
 
-        breakpoint()
 
-
-        # call state passing
+        # call scan
         assert (torch.allclose(mamba_test, ema_output, atol=1e-2))
+        assert (torch.allclose(states_ema_loop, ema_output.to("cpu"), atol=1e-2))
 
         
 

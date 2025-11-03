@@ -25,7 +25,7 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 # )
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8)
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8)
     ],
     key=['chunk_size', 'token_dim', 'IS_CAUSAL'],
 )
@@ -88,7 +88,8 @@ def _ema_scan_fwd_kernel(
     
     #produce (BLOCK_SIZE_M, BLOCK_SIZE_N) size outer product / mul between the elements
     #TODO(kartiksrinivas): is this better to write as uv^T and use a matmul?
-    acc_init = A_cs_m[:, None] * prev_state[None, :] # outer product
+    acc_init = tl.exp(tl.minimum(A_cs_m[:, None], 0.0)) * prev_state[None, :] # outer product
+    
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     acc += acc_init.to(tl.float32)
 
