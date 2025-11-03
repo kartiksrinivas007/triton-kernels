@@ -155,8 +155,8 @@ class TestEmaStateFwdKernels:
 
 
         # call state passing
-        assert (torch.allclose(mamba_final_test, ema_final_state, atol=1e-1))
-        assert (torch.allclose(mamba_test, ema_states_updated, atol=1e-1))
+        assert (torch.allclose(mamba_final_test, ema_final_state, atol=1e-2))
+        assert (torch.allclose(mamba_test, ema_states_updated, atol=1e-2))
 
         
 
