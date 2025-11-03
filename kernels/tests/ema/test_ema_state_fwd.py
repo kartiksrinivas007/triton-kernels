@@ -14,7 +14,7 @@ import triton.runtime.driver as driver
 import math
 
 
-def ema_loop(X, P, chunk_size):
+def ema_chunked_loop(X, P, chunk_size):
     B, T, D = X.shape
     N  = math.ceil(T / chunk_size)
     Z = torch.zeros(B, N, D)
@@ -133,7 +133,7 @@ class TestEmaStateFwdKernels:
 
         mamba_states = rearrange(states.squeeze(-1), " b c h d -> b c (h d)")
 
-        states_ema_loop = ema_loop(self.X, self.P, chunk_size=self.MAMBA_CHUNK_SIZE)
+        states_ema_loop = ema_chunked_loop(self.X, self.P, chunk_size=self.MAMBA_CHUNK_SIZE)
 
         ema_cs = ema_chunk_cumsum_fwd(
             self.A_ema, chunk_size=self.MAMBA_CHUNK_SIZE
@@ -150,8 +150,6 @@ class TestEmaStateFwdKernels:
 
 
         assert torch.allclose(mamba_states, ema_states, atol=1e-2)
-
-        breakpoint()
         assert torch.allclose(mamba_states.to("cpu"), states_ema_loop, atol=1e-1)
         
 

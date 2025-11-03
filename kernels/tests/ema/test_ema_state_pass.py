@@ -17,20 +17,6 @@ import triton.runtime.driver as driver
 import math
 
 
-def ema_loop(X, P, chunk_size):
-    B, T, D = X.shape
-    N  = math.ceil(T / chunk_size)
-    Z = torch.zeros(B, N, D)
-    for b in range(B):
-        z_prev = torch.zeros(D, device=X.device, dtype=X.dtype)
-        for t in range(T):
-            p = P[b, t, 0]
-            x = X[b, t]
-            z = (1.0 - p) * z_prev + p * x
-            z_prev = z
-    return Z
-
-
 def _get_gpu_specifications(DEVICE):
 
     assert torch.cuda.is_available(), "CUDA must be avialble to run triton kernels"
@@ -128,7 +114,6 @@ class TestEmaStateFwdKernels:
                                             initial_states= None,
                                             seq_idx=None, chunk_size=None, out_dtype=self.C_m.dtype)
 
-        states_ema_loop = ema_loop(self.X, self.P, chunk_size=self.MAMBA_CHUNK_SIZE)
 
         ema_cs = ema_chunk_cumsum_fwd(
             self.A_ema, chunk_size=self.MAMBA_CHUNK_SIZE
