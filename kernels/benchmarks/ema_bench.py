@@ -7,10 +7,11 @@ from kernels.ema_combined import ema_chunk_scan_combined
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from einops import rearrange, repeat
+from kernels.ema_kernels.ema_combined_fwd import ema_matmul_scan_combined
 
 
 MAMBA_NUM_HEADS = 1
-MAMBA_CHUNK_SIZE = 256
+MAMBA_CHUNK_SIZE = 128
 
 def ema_simple(X, P):
 
@@ -41,16 +42,16 @@ def ema_loop(X, P):
 
 
 bench_configs = []
-for head_dim in [64, 128, 256]:
-    for batch_size in [1, 2, 4]:
+for head_dim in [64, 128, 256, 512, 1024]:
+    for batch_size in [8, 16]:
         bench_configs.append(
             triton.testing.Benchmark(
                 x_names=["SEQLEN"],
-                x_vals=[2**i for i in range(10, 15)],  # 128 -> 2048
+                x_vals=[2**i for i in range(13, 18)],  
                 line_arg="provider",
-                line_vals=["triton", "torch", "ema_mamba", "mamba"],
-                line_names=["Triton", "Torch", "Ema_mamba", "Mamba"],
-                styles=[("red", "-"), ("blue", "--"), ("yellow", "-"), ("green", "--")],
+                line_vals=["triton_matmul", "triton_prefix", "torch", "ema_mamba", "mamba"],
+                line_names=["Triton_matmul", "Triton Prefix", "Torch", "Ema_mamba", "Mamba"],
+                styles=[("purple", "-"),("red", "-"), ("blue", "--"), ("yellow", "-"), ("green", "--")],
                 ylabel="GB/s (approx)",
                 plot_name=f"ema_b{batch_size}_head_dim{head_dim}_nh{MAMBA_NUM_HEADS}.bench",
                 args={
@@ -75,7 +76,7 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
         # naive EMA in PyTorch
         fn = lambda: ema_simple(x, p)
         ms = triton.testing.do_bench_cudagraph(fn)
-    elif provider == "triton":
+    elif provider == "triton_prefix":
         fn = lambda: ema_scan_combined(x, p)
         ms = triton.testing.do_bench_cudagraph(fn)
     elif provider == "ema_mamba":
@@ -100,6 +101,13 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
         fn = lambda: mamba_chunk_scan_combined(
             X_m, dt, A, B_m, C_m, chunk_size=MAMBA_CHUNK_SIZE, seq_idx=None)
         ms = triton.testing.do_bench_cudagraph(fn)
+    elif provider == "triton_matmul":
+        fn = lambda : ema_matmul_scan_combined(
+            x, p, chunk_size=MAMBA_CHUNK_SIZE
+        )
+        ms = triton.testing.do_bench_cudagraph(fn)
+        pass
+
 
     # Rough throughput: bytes processed per second
     bytes_moved = 3 * x.numel() * x.element_size()  # read X, write Z, read p
@@ -108,4 +116,4 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
 
 
 if __name__ == "__main__":
-    bench_ema.run(print_data=True, save_path="./kernels/benchmarks/ema_scan")
+    bench_ema.run(print_data=True, save_path="./kernels/benchmarks/outputs_ema_scan")
