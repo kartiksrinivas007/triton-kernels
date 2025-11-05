@@ -8,23 +8,20 @@ from kernels.mamba_kernels.mamba_cumsum import _chunk_cumsum_fwd
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from einops import rearrange, repeat
 
-BATCH_SIZE = 8
-SEQLEN = 8192
-HEAD_DIM = 512
-MAMBA_HEAD_DIM = 64
-MAMBA_NUM_HEADS = 8
+BATCH_SIZE = 16
+MAMBA_NUM_HEADS = 2
 DTYPE = torch.float32
 
 
 bench_configs = []
-for mamba_chunk_size in [64, 128, 256]:
-    for head_dim in [256, 512]:
-        for raw in [False, True]:
+for mamba_chunk_size in [128]:
+    for head_dim in [1024]:
+        for raw in [True]:
             for plot_time in [False, True]:
                 bench_configs.append(
                     triton.testing.Benchmark(
                         x_names=["SEQLEN"],
-                        x_vals=[2**i for i in range(13, 17)],  # 128 -> 2048
+                        x_vals=[2**i for i in range(16, 17)],  # 128 -> 2048
                         line_arg="provider",
                         line_vals=["ema","mamba"],
                         line_names=["Ema", "Mamba"],
@@ -34,7 +31,7 @@ for mamba_chunk_size in [64, 128, 256]:
                         args={
                             "BATCH": BATCH_SIZE,
                             "HEAD_DIM": head_dim,
-                            "MAMBA_HEAD_DIM": head_dim / MAMBA_NUM_HEADS, # use 2 heads
+                            "MAMBA_HEAD_DIM": head_dim // MAMBA_NUM_HEADS, # use 2 heads
                             "MAMBA_CHUNK_SIZE": mamba_chunk_size,
                             "device": "cuda",
                             "raw": raw,
@@ -64,6 +61,8 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
     MAMBA_DATA_OUT = (MAMBA_CS_NUMEL + DT_OUT_NUMEL) * P.element_size()
     EMA_DATA_OUT = EMA_CS_NUMEL * P.element_size()
     
+    plot_name = f"./bench_dump/raw_{str(raw)}_time_{str(plot_time)}_ema_b{BATCH_SIZE}_chunk_size{mamba_chunk_size}_head_dim{head_dim}_nh{MAMBA_NUM_HEADS}.bench"
+    
 
     def mamba_fn():
         dt_mamba = -torch.log(1 - P).to(torch.float32).squeeze(-1)
@@ -87,7 +86,7 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
                 A_ema, chunk_size=MAMBA_CHUNK_SIZE
             )
             ms = triton.testing.do_bench_cudagraph(raw_ema_fn)
-            bytes_moved = EMA_DATA_OUT + EMA_DATA_READ if not plot_time else 1
+            bytes_moved = EMA_DATA_OUT + EMA_DATA_READ
 
         elif provider == "mamba":
             dt_mamba = -torch.log(1 - P).to(torch.float32).squeeze(-1)
@@ -97,18 +96,23 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
                 dt_mamba, A_mamba, chunk_size=MAMBA_CHUNK_SIZE
             )
             ms = triton.testing.do_bench_cudagraph(raw_mamba_fn)
-            bytes_moved = MAMBA_DATA_OUT + MAMBA_DATA_READ if not plot_time else 1
+            bytes_moved = MAMBA_DATA_OUT + MAMBA_DATA_READ 
     else:
         if provider == "ema":
             ms = triton.testing.do_bench_cudagraph(ema_fn)
-            bytes_moved = EMA_DATA_OUT + EMA_DATA_READ if not plot_time else 1
+            bytes_moved = EMA_DATA_OUT + EMA_DATA_READ 
         elif provider == "mamba":
             ms = triton.testing.do_bench_cudagraph(mamba_fn)
-            bytes_moved = MAMBA_DATA_OUT + MAMBA_DATA_READ if not plot_time else 1
+            bytes_moved = MAMBA_DATA_OUT + MAMBA_DATA_READ 
 
     # Rough throughput: bytes processed per second
     gbps = bytes_moved / (ms * 1e-3) / 1e9 # type: ignore 
-    return gbps
+    with open(plot_name, "a+") as f :
+        f.write("="* 50 + "CUMSUM" + "="* 50 + "\n")
+        f.write(f"[{provider}] ms={ms:.3f}  bytes_moved={bytes_moved/1e6:.3f} MB  GBps={gbps:.6f} \n")
+        pass
+
+    return gbps if not plot_time else 1.0/ms # type:ignore
 
 
 if __name__ == "__main__":

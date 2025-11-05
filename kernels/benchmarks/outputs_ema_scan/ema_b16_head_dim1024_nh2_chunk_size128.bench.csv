@@ -1,0 +1,2 @@
+SEQLEN,Triton_matmul,Triton Prefix,Ema_mamba,Mamba
+65536.000000,261.901247,197.145578,378.431572,384.536623
