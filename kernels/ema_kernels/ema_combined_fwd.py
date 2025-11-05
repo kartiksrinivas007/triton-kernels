@@ -10,13 +10,13 @@ from kernels.ema_kernels.ema_scan_fwd import _ema_scan_fwd
 
 
 def _ema_matmul_scan_combined_fwd(x, P, chunk_size, dtype=torch.float32):
-    batch, seqlen, token_dim = x.shape
-    assert P.shape == (batch, seqlen, 1)
-    #TODO(kartiksrinivas): Need to check this for bugs, what needs to be contiguous exactly
-    if P.stride(-1) != 1:
-        P = P.contiguous()
-    if x.stride(-1) != 1 and x.stride(1) != 1:  # Either M or K dimension should be contiguous
-        x = x.contiguous()
+    # batch, seqlen, token_dim = x.shape
+    # assert P.shape == (batch, seqlen, 1)
+    # #TODO(kartiksrinivas): Need to check this for bugs, what needs to be contiguous exactly
+    # if P.stride(-1) != 1:
+    #     P = P.contiguous()
+    # if x.stride(-1) != 1 and x.stride(1) != 1:  # Either M or K dimension should be contiguous
+    #     x = x.contiguous()
     
     A_ema = torch.log(1 - P).squeeze(-1) # the final dimension
     X_ema = x * P # broadcast

@@ -9,10 +9,22 @@ import triton.language as tl
 # TODO(kartiksrinivas): Check correctness with "python -m pytest -v kernels/tests/ema/test_ema_state_pass.py --count=5  --randomly-seed=400244919"
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_T': 64}),
-        triton.Config({'BLOCK_SIZE_T': 128}),
-        triton.Config({'BLOCK_SIZE_T': 256}),
-        triton.Config({'BLOCK_SIZE_T': 512}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 64}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 256}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 512}),
+        triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 64}),
+        triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 256}),
+        triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 512}),
+        triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 64}),
+        triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 256}),
+        triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 512}),
+        triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 64}),
+        triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 256}),
+        triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 512}),
         # triton.Config({'BLOCK_SIZE_T': 1024}), -- causes bugs! its bigger than token_dim
         # triton.Config({'BLOCK_SIZE_T': 2048}),
     ],
@@ -74,7 +86,7 @@ def _ema_state_passing_fwd_kernel(
         final_states = tl.load(states_ptrs, mask=bt_mask, other=0.0).to(tl.float32)
         A_cs_last = tl.load(A_cs_last_ptrs, mask = offs_b < batch, other=0.0).to(tl.float32)
         scale = tl.exp(A_cs_last)
-        acc = scale * acc + final_states
+        acc = scale[:, None] * acc + final_states
         if c < nchunks - 1:
             tl.store(out_ptrs, acc, mask=bt_mask)
         else:
@@ -107,7 +119,7 @@ def _ema_state_passing_fwd(states : torch.Tensor, A_cs_last : torch.Tensor , ini
             out.stride(0), out.stride(1), out.stride(2),
             final_states.stride(0), final_states.stride(1),
             A_cs_last.stride(0), A_cs_last.stride(1),
-            BLOCK_SIZE_B = 1 # no blocking  over batch for now
+            # BLOCK_SIZE_B = 1 # no blocking  over batch for now
         )
     return out, final_states
 

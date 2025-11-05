@@ -25,7 +25,11 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 # )
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8)
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64 , 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128 , 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 256 , 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=8),
     ],
     key=['chunk_size', 'token_dim', 'IS_CAUSAL'],
 )
@@ -95,34 +99,6 @@ def _ema_scan_fwd_kernel(
 
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
 
-    # # Assertion `!(srcMmaLayout && dstMmaLayout) && "Unexpected mma -> mm a layout conversion"' failed.
-    # # With Triton 2.2.0, this works
-    # if IS_TRITON_22 or pid_c > -1:
-    #     # Faster to just do 1 iteration with larger BLOCK_SIZE_K, up to block size 128
-    #     offs_k_dstate = tl.arange(0, BLOCK_SIZE_DSTATE if BLOCK_SIZE_DSTATE <= 128 else BLOCK_SIZE_K)
-    #     C_ptrs = C_ptr + (offs_m[:, None] * stride_C_seqlen + offs_k_dstate[None, :] * stride_C_dstate)
-    #     prev_states_ptrs = prev_states_ptr + (offs_n[None, :] * stride_states_hdim + offs_k_dstate[:, None] * stride_states_dstate)
-    #     if not HAS_SEQ_IDX:
-    #         scale_m = tl.exp(dA_cs_m)
-    #     else:
-    #         scale_m = tl.where(seq_idx_m == seq_idx_prev, tl.exp(dA_cs_m), 0.0)
-    #     if BLOCK_SIZE_DSTATE <= 128:
-    #         C = tl.load(C_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k_dstate[None, :] < dstate), other=0.0)
-    #         prev_states = tl.load(prev_states_ptrs, mask=(offs_k_dstate[:, None] < dstate) & (offs_n[None, :] < hdim), other=0.0)
-    #         prev_states = prev_states.to(C_ptr.dtype.element_ty)
-    #         acc = tl.dot(C, prev_states) * scale_m[:, None]
-    #     else:
-    #         for k in range(0, dstate, BLOCK_SIZE_K):
-    #             C = tl.load(C_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k_dstate[None, :] < dstate - k), other=0.0)
-    #             # C = (C * scale_m[:, None]).to(C_ptr.dtype.element_ty)
-    #             prev_states = tl.load(prev_states_ptrs, mask=(offs_k_dstate[:, None] < dstate - k) & (offs_n[None, :] < hdim), other=0.0)
-    #             prev_states = prev_states.to(C_ptr.dtype.element_ty)
-    #             acc += tl.dot(C, prev_states)
-    #             C_ptrs += BLOCK_SIZE_K
-    #             prev_states_ptrs += BLOCK_SIZE_K
-    #         acc *= scale_m[:, None]
-    
-
 
     # the offset of x in the seqlen dimension # this needs contiguity in C, Q
 
@@ -163,25 +139,6 @@ def _ema_scan_fwd_kernel(
         x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
         A_cumsum_ptrs += BLOCK_SIZE_K * stride_A_cs_csize
 
-
-    # if HAS_D:
-    #     if D_HAS_HDIM:
-    #         D = tl.load(D_ptr + pid_h * stride_D_head + offs_n, mask=offs_n < hdim, other=0.0).to(tl.float32)
-    #     else:
-    #         D = tl.load(D_ptr + pid_h * stride_D_head).to(tl.float32)
-    #     x_residual = tl.load(x_ptr + (offs_m[:, None] * stride_x_seqlen + offs_n[None, :] * stride_x_hdim),
-    #                          mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < hdim), other=0.0).to(tl.float32)
-    #     acc += x_residual * D
-
-    # if HAS_Z:
-    #     out_x_ptr += pid_b * stride_out_batch + pid_c * chunk_size * stride_out_seqlen + pid_h * stride_out_head
-    #     out_x_ptrs = out_x_ptr + (stride_out_seqlen * offs_out_m[:, None] + offs_out_n[None, :])
-    #     tl.store(out_x_ptrs, acc, mask=(offs_out_m[:, None] < chunk_size_limit) & (offs_out_n[None, :] < hdim))
-
-    #     z_ptr += pid_b * stride_z_batch + pid_c * chunk_size * stride_z_seqlen + pid_h * stride_z_head
-    #     z_ptrs = z_ptr + (stride_z_seqlen * offs_out_m[:, None] + stride_z_hdim * offs_out_n[None, :])
-    #     z = tl.load(z_ptrs, mask=(offs_out_m[:, None] < chunk_size_limit) & (offs_out_n[None, :] < hdim), other=0.0).to(tl.float32)
-    #     acc *= z * tl.sigmoid(z)
 
     tl.store(out_ptrs, acc, mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < token_dim))
 

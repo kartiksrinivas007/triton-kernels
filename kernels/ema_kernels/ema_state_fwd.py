@@ -115,7 +115,6 @@ def _ema_chunk_state_fwd(x, A_cumsum, seq_idx=None, states=None, states_in_fp32=
 
     assert x.is_contiguous()
     assert A_cumsum.is_contiguous()
-
     assert A_cumsum.shape == (batch, nchunks, chunk_size) 
 
     if states is not None:
