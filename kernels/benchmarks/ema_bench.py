@@ -48,7 +48,7 @@ for head_dim in [1024]:
                 bench_configs.append(
                     triton.testing.Benchmark(
                         x_names=["SEQLEN"],
-                        x_vals=[2**i for i in range(16, 17)],  
+                        x_vals=[2**i for i in range(13, 17)],  
                         line_arg="provider",
                         line_vals=["triton_matmul", "triton_prefix", "ema_mamba", "mamba"],
                         line_names=["Triton_matmul", "Triton Prefix", "Ema_mamba", "Mamba"],
@@ -99,8 +99,10 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
             X_m, dt, A, B_m, C_m, chunk_size=MAMBA_CHUNK_SIZE, seq_idx=None)
         ms = triton.testing.do_bench(fn)
     elif provider == "triton_matmul":
+        A_ema = torch.log(1 - p).squeeze(-1) # the final dimension
+        X_ema = x * p # broadcast
         fn = lambda : ema_matmul_scan_combined(
-            x, p, chunk_size=MAMBA_CHUNK_SIZE
+            A_ema, X_ema, chunk_size=MAMBA_CHUNK_SIZE
         )
         ms = triton.testing.do_bench_cudagraph(fn)
         pass

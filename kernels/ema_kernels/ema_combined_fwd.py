@@ -9,7 +9,7 @@ from kernels.ema_kernels.ema_scan_fwd import _ema_scan_fwd
 
 
 
-def _ema_matmul_scan_combined_fwd(x, P, chunk_size, dtype=torch.float32):
+def _ema_matmul_scan_combined_fwd(A_ema, X_ema, chunk_size, dtype=torch.float32):
     # batch, seqlen, token_dim = x.shape
     # assert P.shape == (batch, seqlen, 1)
     # #TODO(kartiksrinivas): Need to check this for bugs, what needs to be contiguous exactly
@@ -18,8 +18,7 @@ def _ema_matmul_scan_combined_fwd(x, P, chunk_size, dtype=torch.float32):
     # if x.stride(-1) != 1 and x.stride(1) != 1:  # Either M or K dimension should be contiguous
     #     x = x.contiguous()
     
-    A_ema = torch.log(1 - P).squeeze(-1) # the final dimension
-    X_ema = x * P # broadcast
+
 
     ema_cs = ema_chunk_cumsum_fwd(
         A_ema, chunk_size=chunk_size
@@ -65,16 +64,15 @@ class EMAMatmulCombinedFn(torch.autograd.Function):
 
         # This is not implemented yet
 
-        out, x, dt, dA_cumsum, A, B, C, D, z, dt_bias, initial_states, seq_idx = ctx.saved_tensors
-        assert not ctx.return_varlen_states, "return_varlen_states is not supported in backward"
-        dfinal_states = args[0] if ctx.return_final_states else None
-        # dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=ctx.dt_softplus, dt_limit=ctx.dt_limit)
-        dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states = (None, ) * 9
-        return dx, ddt, dA, dB, dC, None, dD, dz, ddt_bias, dinitial_states, None, None, None, None, None, None
+        # out, x, dt, dA_cumsum, A, B, C, D, z, dt_bias, initial_states, seq_idx = ctx.saved_tensors
+        # assert not ctx.return_varlen_states, "return_varlen_states is not supported in backward"
+        # dfinal_states = args[0] if ctx.return_final_states else None
+        # # dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=ctx.dt_softplus, dt_limit=ctx.dt_limit)
+        # dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states = (None, ) * 9
+        return None
 
 
-
-def ema_matmul_scan_combined(x, P, chunk_size):
-    return EMAMatmulCombinedFn.apply(x, P, chunk_size)
+def ema_matmul_scan_combined(A_ema, X_ema, chunk_size):
+    return EMAMatmulCombinedFn.apply(A_ema, X_ema, chunk_size)
 
 
