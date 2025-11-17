@@ -51,10 +51,10 @@ def _ema_matmul_scan_combined_fwd(A_ema, X_ema, chunk_size, dtype=torch.float32)
 class EMAMatmulCombinedFn(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x, P, chunk_size):
+    def forward(ctx, A_ema, X_ema, chunk_size):
 
-        out, dA_cumsum, states, final_states = _ema_matmul_scan_combined_fwd(x, P, chunk_size=chunk_size)
-        ctx.save_for_backward(out, dA_cumsum, states, final_states, x, P)
+        out, dA_cumsum, states, final_states = _ema_matmul_scan_combined_fwd(A_ema, X_ema, chunk_size=chunk_size)
+        ctx.save_for_backward(out, dA_cumsum, states, final_states, A_ema, X_ema)
         ctx.chunk_size = chunk_size
 
         return out
