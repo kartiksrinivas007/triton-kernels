@@ -167,7 +167,6 @@ class TestEmaStateFwdKernels:
         # call scan
         assert (torch.allclose(mamba_test, ema_output, atol=1e-2))
         assert (torch.allclose(states_ema_loop, ema_output.to("cpu"), atol=1e-2))
-
         
 
 

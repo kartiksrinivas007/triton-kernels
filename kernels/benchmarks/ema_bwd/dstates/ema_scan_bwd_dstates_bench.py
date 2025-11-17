@@ -17,17 +17,17 @@ MAMBA_CHUNK_SIZE = 128
 
 
 bench_configs = []
-for mamba_chunk_size in [128]:
+for mamba_chunk_size in [128, 256]:
     for head_dim in [1024]:
         for raw in [True]:
             for plot_time in [False, True]:
                 bench_configs.append(
                     triton.testing.Benchmark(
                         x_names=["SEQLEN"],
-                        x_vals=[2**i for i in range(16, 17)],  # 128 -> 2048
+                        x_vals=[2**i for i in range(13, 17)],  # 128 -> 2048
                         line_arg="provider",
-                        line_vals=["ema_torch","mamba"],
-                        line_names=["Ema", "Mamba"],
+                        line_vals=["ema_torch", "ema_triton", "mamba"],
+                        line_names=["EmaTorch", "EmaTriton", "Mamba"],
                         styles=[("red", "-"), ("blue", "--"), ("yellow", "-"), ("green", "--")],
                         ylabel="GB/s (approx)" if not plot_time else "1/time",
                         plot_name=f"raw_{str(raw)}_time_{str(plot_time)}_ema_b{BATCH_SIZE}_chunk_size{mamba_chunk_size}_head_dim{head_dim}_nh{MAMBA_NUM_HEADS}.bench",
@@ -164,13 +164,24 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
             mamba_dstates = _chunk_scan_bwd_dstates(C_m, mamba_cs, 
                                                             dout_m)
 
-        def ema_raw_fn():
-            torch_dstates = torch.sum(torch.mul(rearrange(dout_ema, "b (c q) t -> b c q t", q=MAMBA_CHUNK_SIZE), 
-                                            torch.exp(ema_cs[..., None])), dim = 2)
+        def ema_torch_raw_fn():
+            torch_dstates = torch.sum(
+                torch.mul(
+                    rearrange(dout_ema, "b (c q) t -> b c q t", q=MAMBA_CHUNK_SIZE),
+                    torch.exp(ema_cs[..., None]),
+                ),
+                dim=2,
+            )
+
+        def ema_triton_raw_fn():
+            ema_dstates = _ema_chunk_scan_bwd_dstates(ema_cs, dout_ema)
 
         if provider == "ema_torch":
-            ms = triton.testing.do_bench_cudagraph(ema_raw_fn)
-            bytes_moved = ema_data_read + ema_or_mamba_data_out 
+            ms = triton.testing.do_bench_cudagraph(ema_torch_raw_fn)
+            bytes_moved = ema_data_read + ema_or_mamba_data_out
+        elif provider == "ema_triton":
+            ms = triton.testing.do_bench_cudagraph(ema_triton_raw_fn)
+            bytes_moved = ema_data_read + ema_or_mamba_data_out
         elif provider == "mamba":
             ms = triton.testing.do_bench_cudagraph(mamba_raw_fn)
             bytes_moved = mamba_data_read + ema_or_mamba_data_out 
@@ -187,4 +198,4 @@ def bench_ema(BATCH, SEQLEN, HEAD_DIM, MAMBA_HEAD_DIM, MAMBA_CHUNK_SIZE, provide
 
 
 if __name__ == "__main__":
-    bench_ema.run(print_data=True, save_path="./kernels/benchmarks/ema/state_fwd/state_fwd_outputs/")
+    bench_ema.run(print_data=True, save_path="./kernels/benchmarks/ema_bwd/dstates/dstates_outputs/")

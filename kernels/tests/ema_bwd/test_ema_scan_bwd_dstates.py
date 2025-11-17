@@ -6,6 +6,7 @@ from einops import rearrange, repeat
 
 # from kernels.ema_kernels_bwd.ema_sc
 from kernels.ema_kernels.ema_cumsum import ema_chunk_cumsum_fwd
+from kernels.ema_kernels_bwd.ema_scan_bwd import _ema_chunk_scan_bwd_dstates
 from kernels.mamba_kernels_bwd.mamba_scan_bwd import _chunk_scan_bwd_dstates
 from kernels.mamba_kernels.mamba_cumsum import _chunk_cumsum_fwd
 
@@ -108,7 +109,16 @@ class TestEmaCumsumKernels:
         )
         # across heads the computation should be the same
 
-        torch_dstates = torch.sum(torch.mul(rearrange(self.ema_dout, "b (c q) t -> b c q t", q=self.MAMBA_CHUNK_SIZE), 
-                                            torch.exp(ema_cs[..., None])), dim = 2)
-        
+        torch_dstates = torch.sum(
+            torch.mul(
+                rearrange(self.ema_dout, "b (c q) t -> b c q t", q=self.MAMBA_CHUNK_SIZE),
+                torch.exp(ema_cs[..., None]),
+            ),
+            dim=2,
+        )
+
+        # EMA dstates kernel should reproduce torch_dstates
+        ema_dstates = _ema_chunk_scan_bwd_dstates(ema_cs, self.ema_dout)
+
         assert torch.allclose(mamba_cs[:, 0, ...], ema_cs, atol=1e-2)
+        assert torch.allclose(ema_dstates, torch_dstates, atol=1e-2, rtol=1e-2)
