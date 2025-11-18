@@ -7,8 +7,11 @@ from einops import rearrange, repeat
 # from kernels.ema_kernels_bwd.ema_sc
 from kernels.ema_kernels.ema_cumsum import ema_chunk_cumsum_fwd
 from kernels.ema_kernels_bwd.ema_scan_bwd import _ema_chunk_scan_bwd_dstates
+from kernels.ema_kernels_bwd.ema_state_passing_bwd_dstates import _ema_state_passing_bwd
+
 from kernels.mamba_kernels_bwd.mamba_scan_bwd import _chunk_scan_bwd_dstates
 from kernels.mamba_kernels.mamba_cumsum import _chunk_cumsum_fwd
+from kernels.mamba_kernels_bwd.mamba_state_passing_bwd_dstates import _state_passing_bwd
 
 import triton.runtime.driver as driver
 
@@ -63,6 +66,7 @@ class TestEmaCumsumKernels:
         P = torch.rand((cls.BATCH_SIZE, cls.SEQLEN, 1), dtype=torch.float32, device=DEVICE)
         Z = torch.empty_like(X)  # same shape as X, but smoothed according to P
         dout = torch.randn_like(Z) # should have the same shape as Z
+        states = torch.randn_like(Z)
 
 
         # input variables for the mamba kernel
@@ -74,9 +78,11 @@ class TestEmaCumsumKernels:
         cls.B_m = rearrange(P.to(torch.float32), "b l 1 -> b l 1 1")
         cls.C_m = torch.ones_like(cls.B_m)
         cls.dout_m = rearrange(dout, "b l (h p) -> b l h p", p = cls.MAMBA_HEAD_DIM)
+        cls.states_m = rearrange(states, "b l (h p) -> b l h p", p = cls.MAMBA_HEAD_DIM)
 
         cls.A_ema = torch.log(1 - P).squeeze(-1) # the final dimension
         cls.ema_dout= dout
+        cls.ema_states = states
 
         # modified input variables for the ema kernel
         # Steps 
@@ -88,31 +94,66 @@ class TestEmaCumsumKernels:
         # 4. Write code to benchmark both kernels
         
         
-    def test_mamba_scan_bwd_dstates_kernel(self):
-        mamba_cs, mamba_dt_out = _chunk_cumsum_fwd(
-            self.dt, self.A, chunk_size=self.MAMBA_CHUNK_SIZE
+    def test_ema_state_passing_bwd_matches_mamba(self):
+        """
+        Check that EMA state-passing backward produces the same gradients
+        as the Mamba implementation when we flatten (head, dim) into a
+        single token_dim and use a head-independent dA_chunk_cumsum.
+        """
+        DEVICE = driver.active.get_active_torch_device()  # type: ignore
+
+        batch = self.BATCH_SIZE
+        nchunks = self.NUM_CHUNKS
+        nheads = self.N_HEADS
+        headdim = self.MAMBA_HEAD_DIM
+        token_dim = self.HEAD_DIM  # nheads * headdim
+
+        # random states and upstream gradients at chunk level
+        states_mamba = torch.randn(
+            batch, nchunks, nheads, headdim, device=DEVICE, dtype=self.DTYPE
         )
-        mamba_dstates = _chunk_scan_bwd_dstates(self.C_m, mamba_cs, 
-                                                         self.dout_m)
+        dout_mamba = torch.randn_like(states_mamba)
 
+        # use the same dA_chunk_cumsum across heads so flattening is valid
+        dA_base = torch.randn(batch, nchunks, device=DEVICE, dtype=self.DTYPE)
+        dA_mamba = dA_base[:, None, :].expand(batch, nheads, nchunks)
 
-        # compute it via pytorch
-
-        ema_cs = ema_chunk_cumsum_fwd(
-            self.A_ema, chunk_size=self.MAMBA_CHUNK_SIZE
+        # Mamba backward over chunks
+        new_mamba_dstates, ddA_mamba, dinit_mamba, states_conv_mamba = _state_passing_bwd(  # type: ignore
+            states_mamba,
+            dA_mamba,
+            dout_mamba,
+            dfinal_states=None,
+            seq_idx=None,
+            has_initial_states=False,
+            dstates_dtype=dout_mamba.dtype,
+            states_dtype=states_mamba.dtype,
+            chunk_size=self.MAMBA_CHUNK_SIZE,
         )
-        # across heads the computation should be the same
 
-        torch_dstates = torch.sum(
-            torch.mul(
-                rearrange(self.ema_dout, "b (c q) t -> b c q t", q=self.MAMBA_CHUNK_SIZE),
-                torch.exp(ema_cs[..., None]),
-            ),
-            dim=2,
+        # Flatten (head, dim) into token_dim for EMA
+        states_ema = rearrange(states_mamba, "b c h p -> b c (h p)")
+        dout_ema = rearrange(dout_mamba, "b c h p -> b c (h p)")
+        assert states_ema.shape == (batch, nchunks, token_dim)
+        assert dout_ema.shape == (batch, nchunks, token_dim)
+
+        # EMA backward over chunks
+        new_ema_dstates, ddA_ema, dinit_ema, states_conv_ema = _ema_state_passing_bwd(  # type: ignore
+            states_ema,
+            dA_base,
+            dout_ema,
+            dfinal_states=None,
+            seq_idx=None,
+            has_initial_states=False,
+            dstates_dtype=dout_ema.dtype,
+            states_dtype=states_ema.dtype,
+            chunk_size=self.MAMBA_CHUNK_SIZE,
         )
 
-        # EMA dstates kernel should reproduce torch_dstates
-        ema_dstates = _ema_chunk_scan_bwd_dstates(ema_cs, self.ema_dout)
+        # Compare dstates: flatten Mamba's (head, dim) and match EMA
+        new_mamba_dstates_flat = rearrange(new_mamba_dstates, "b c h p -> b c (h p)")
+        assert torch.allclose(new_ema_dstates, new_mamba_dstates_flat, atol=1e-2, rtol=1e-2)
 
-        assert torch.allclose(mamba_cs[:, 0, ...], ema_cs, atol=1e-2)
-        assert torch.allclose(ema_dstates, torch_dstates, atol=1e-2, rtol=1e-2)
+        # Compare dA gradients: EMA aggregates over all heads, so sum Mamba's ddA over heads
+        ddA_mamba_agg = ddA_mamba.sum(dim=1)  # shape: (batch, nchunks)
+        assert torch.allclose(ddA_ema, ddA_mamba_agg, atol=1e-2, rtol=1e-2)
