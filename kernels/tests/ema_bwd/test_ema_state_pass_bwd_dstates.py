@@ -114,9 +114,18 @@ class TestEmaCumsumKernels:
         )
         dout_mamba = torch.randn_like(states_mamba)
 
-        # use the same dA_chunk_cumsum across heads so flattening is valid
-        dA_base = torch.randn(batch, nchunks, device=DEVICE, dtype=self.DTYPE)
-        dA_mamba = dA_base[:, None, :].expand(batch, nheads, nchunks)
+        # use actual per-chunk cumsums from the respective cumsum kernels
+        mamba_cs, _ = _chunk_cumsum_fwd(
+            self.dt, self.A, chunk_size=self.MAMBA_CHUNK_SIZE
+        )
+        # (batch, nheads, nchunks, chunk_size) -> take last position in each chunk
+        dA_mamba = mamba_cs[:, :, :, -1]
+
+        ema_cs = ema_chunk_cumsum_fwd(
+            self.A_ema, chunk_size=self.MAMBA_CHUNK_SIZE
+        )
+        # (batch, nchunks, chunk_size) -> take last position in each chunk
+        dA_base = ema_cs[..., -1]
 
         # Mamba backward over chunks
         new_mamba_dstates, ddA_mamba, dinit_mamba, states_conv_mamba = _state_passing_bwd(  # type: ignore

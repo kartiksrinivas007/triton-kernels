@@ -15,14 +15,14 @@ MAMBA_CHUNK_SIZE = 128
 
 
 bench_configs = []
-for mamba_chunk_size in [128]:
+for mamba_chunk_size in [128, 256, 512]:
     for head_dim in [1024]:
         for raw in [True]:
             for plot_time in [False, True]:
                 bench_configs.append(
                     triton.testing.Benchmark(
                         x_names=["SEQLEN"],
-                        x_vals=[2**i for i in range(16, 17)],  # 65_536
+                        x_vals=[2**i for i in range(13, 17)],  # 65_536
                         line_arg="provider",
                         line_vals=["ema", "mamba"],
                         line_names=["Ema", "Mamba"],
@@ -77,11 +77,17 @@ def bench_ema(
 
     size_computer = lambda *tensors: sum(t.numel() * t.element_size() for t in tensors)
 
+    # data read: states, per-chunk cumsums, and upstream gradients
     mamba_data_read = size_computer(states_mamba, dA_mamba, dout_mamba)
     ema_data_read = size_computer(states_ema, dA_ema, dout_ema)
 
-    # both kernels write dstates of size (BATCH, NUM_CHUNKS, HEAD_DIM)
-    bytes_out = BATCH * NUM_CHUNKS * HEAD_DIM * states_mamba.element_size()
+    # outputs: dstates and ddA_chunk_cumsum
+    mamba_dstates_size = size_computer(dout_mamba)  # same shape as states_mamba
+    mamba_ddA_size = size_computer(dA_mamba)        # same shape as dA_mamba
+    ema_dstates_size = size_computer(dout_ema)      # same shape as states_ema
+    ema_ddA_size = size_computer(dA_ema)            # same shape as dA_ema
+    bytes_out_mamba = mamba_dstates_size + mamba_ddA_size
+    bytes_out_ema = ema_dstates_size + ema_ddA_size
 
     plot_name = (
         f"./bench_dump/bwd_state_pass_raw_{str(raw)}_time_{str(plot_time)}"
@@ -117,10 +123,10 @@ def bench_ema(
 
     if provider == "ema":
         ms = triton.testing.do_bench_cudagraph(ema_raw_fn)
-        bytes_moved = ema_data_read + bytes_out
+        bytes_moved = ema_data_read + bytes_out_ema
     elif provider == "mamba":
         ms = triton.testing.do_bench_cudagraph(mamba_raw_fn)
-        bytes_moved = mamba_data_read + bytes_out
+        bytes_moved = mamba_data_read + bytes_out_mamba
     else:
         raise ValueError(f"Unknown provider: {provider}")
 
@@ -139,6 +145,5 @@ def bench_ema(
 if __name__ == "__main__":
     bench_ema.run(
         print_data=True,
-        save_path="./kernels/benchmarks/ema_bwd/dstates/dstates_outputs/",
+        save_path="./kernels/benchmarks/ema_bwd/state_pass/state_pass_outputs/",
     )
-
