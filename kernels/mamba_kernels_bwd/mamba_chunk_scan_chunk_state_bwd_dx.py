@@ -29,7 +29,7 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
     key=['chunk_size', 'hdim', 'dstate'],
 )
 @triton.jit
-def _ema_chunk_scan_chunk_state_bwd_dx_kernel(
+def _chunk_scan_chunk_state_bwd_dx_kernel(
     # Pointers to matrices
     x_ptr, cb_ptr, dout_ptr, dt_ptr, dA_cumsum_ptr, seq_idx_ptr, D_ptr,
     b_ptr, dstates_ptr,
@@ -186,7 +186,7 @@ def _ema_chunk_scan_chunk_state_bwd_dx_kernel(
     tl.atomic_add(ddt_ptrs, ddt, mask=offs_m < chunk_size)
 
 
-def _ema_chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=None, seq_idx=None, dx=None):
+def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=None, seq_idx=None, dx=None):
     batch, seqlen, nheads, headdim = x.shape
     _, _, nchunks, chunk_size = dt.shape
     _, _, ngroups, dstate = B.shape
@@ -217,7 +217,7 @@ def _ema_chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D
     grid_dx = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(headdim, META['BLOCK_SIZE_N']),
                         batch * nchunks, nheads)
     with torch.cuda.device(x.device.index):
-        _ema_chunk_scan_chunk_state_bwd_dx_kernel[grid_dx](
+        _chunk_scan_chunk_state_bwd_dx_kernel[grid_dx](
             x, CB, dout, dt, dA_cumsum, seq_idx, D, B, dstates, dx, ddt, dD,
             chunk_size, headdim, dstate,
             batch, seqlen, nheads // ngroups,
