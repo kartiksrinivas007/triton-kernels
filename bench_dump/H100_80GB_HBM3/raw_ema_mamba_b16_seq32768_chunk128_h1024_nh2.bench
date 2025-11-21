@@ -1,0 +1,4 @@
+
+================= BENCHMARK RESULT =================
+[ema_mamba]   ms=3.537   GB/s=1214.8391
+bytes moved = 4297.064 MB
