@@ -30,34 +30,29 @@ def init_to_zero(names):
 @triton.jit
 def _ema_chunk_state_bwd_db_kernel(
     # Pointers to matrices
-    x_ptr, dstates_ptr, b_ptr, dt_ptr, dA_cumsum_ptr, seq_idx_ptr,
-    db_ptr, ddA_cumsum_ptr,
+    x_ptr, dstates_ptr, dA_cumsum_ptr, ddA_cumsum_ptr,
     # Matrix dimensions
-    chunk_size, dstate, hdim,
-    batch, seqlen, nheads, nheads_per_program, ngroups,
+    chunk_size,token_dim,
+    batch, seqlen,
     # Strides
-    stride_x_batch, stride_x_seqlen, stride_x_head, stride_x_hdim,
-    stride_dstates_batch, stride_dstates_chunk, stride_states_head, stride_states_hdim, stride_states_dstate,
-    stride_b_batch, stride_b_seqlen, stride_b_head, stride_b_dstate,
-    stride_dt_batch, stride_dt_chunk, stride_dt_head, stride_dt_csize,
-    stride_dA_cs_batch, stride_dA_cs_chunk, stride_dA_cs_head, stride_dA_cs_csize,
-    stride_seq_idx_batch, stride_seq_idx_seqlen,
-    stride_db_batch, stride_db_seqlen, stride_db_split, stride_db_group, stride_db_dstate,
-    stride_ddA_cs_batch, stride_ddA_cs_chunk, stride_ddA_cs_head, stride_ddA_cs_csize,
-    # Meta-parameters
+    stride_x_batch, stride_x_seqlen, stride_x_token_dim,
+    stride_dstates_batch, stride_dstates_chunk, stride_states_token_dim,
+    stride_dA_cs_batch, stride_dA_cs_chunk, stride_dA_cs_csize,
+    stride_ddA_cs_batch, stride_ddA_cs_chunk, stride_ddA_cs_csize,
     HAS_DDA_CS: tl.constexpr,
-    HAS_SEQ_IDX: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr, 
+    BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
-    pid_c = pid_bc // batch
-    pid_b = pid_bc - pid_c * batch
-    pid_sg = tl.program_id(axis=2)
-    pid_s = pid_sg // ngroups
-    pid_g = pid_sg - pid_s * ngroups
-    num_pid_n = tl.cdiv(dstate, BLOCK_SIZE_N)
-    pid_m = tl.program_id(axis=0) // num_pid_n
-    pid_n = tl.program_id(axis=0) % num_pid_n
+    pid_c = tl.program_id(axis=2)
+    pid_b = tl.program_id(axis=1)
+    pid_m = tl.program_id(axis=0) 
+
+    # compute in the same style as mamba_chunk_state_bwd_db, but we do not have a for loop over heads
+    # instead we have a tiled matmul between x and dstates, and we use that to compute ddA_cs in the same style
+    # we do not need a db, although if needed you can compute it as an intermediate variable, we do nto need dt scaling also
+    # the inner product is in token_dim, but token_dim is broken into BLOCK_SIZE_K tiles, so its over BLOCK_SIZE_K
+
     x_ptr += pid_b * stride_x_batch + pid_c * chunk_size * stride_x_seqlen + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_x_head
     db_ptr += pid_b * stride_db_batch + pid_c * chunk_size * stride_db_seqlen + pid_g * stride_db_group + pid_s * stride_db_split
     dstates_ptr += pid_b * stride_dstates_batch + pid_c * stride_dstates_chunk + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_states_head
@@ -128,56 +123,37 @@ def _ema_chunk_state_bwd_db_kernel(
 
 
 
-def _ema_chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=None, B=None, ngroups=1):
-    batch, seqlen, nheads, headdim = x.shape
-    _, _, nchunks, chunk_size = dt.shape
-    dstate = dstates.shape[-1]
-    assert dt.shape == (batch, nheads, nchunks, chunk_size)
-    assert dA_cumsum.shape == dt.shape
-    assert dstates.shape == (batch, nchunks, nheads, headdim, dstate)
-    if seq_idx is not None:
-        assert seq_idx.shape == (batch, seqlen)
-    if B is not None:
-        assert B.shape == (batch, seqlen, ngroups, dstate)
-        B_strides = (B.stride(0), B.stride(1), B.stride(2), B.stride(3))
-        # Use torch.empty since the Triton kernel will call init_to_zero
-        ddA_cumsum = torch.empty(batch, nheads, nchunks, chunk_size, device=x.device, dtype=torch.float32)
-        ddA_cumsum_strides = (ddA_cumsum.stride(0), ddA_cumsum.stride(2), ddA_cumsum.stride(1), ddA_cumsum.stride(3))
-    else:
-        B_strides = (0, 0, 0, 0)
-        ddA_cumsum = None
-        ddA_cumsum_strides = (0, 0, 0, 0)
-    nheads_ngroups_ratio = nheads // ngroups
-    sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
-    nheads_per_program = max(min(math.ceil(batch * nchunks * nheads / sm_count), nheads_ngroups_ratio), 1)
-    nsplits = triton.cdiv(nheads_ngroups_ratio, nheads_per_program)
+def _ema_chunk_state_bwd_db(x, dA_cumsum, dstates, seq_idx=None, B=None, ngroups=1):
+    batch, seqlen, token_dim = x.shape
+    _, nchunks, chunk_size = dA_cumsum.shape
+    assert dstates.shape == (batch, nchunks, token_dim)
+    ddA_cumsum = torch.empty(batch, nchunks, chunk_size, device=x.device, dtype=torch.float32)
+    ddA_cumsum_strides = (ddA_cumsum.stride(0), ddA_cumsum.stride(1), ddA_cumsum.stride(2))
+
+    # sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+    # nheads_per_program = max(min(math.ceil(batch * nchunks * nheads / sm_count), nheads_ngroups_ratio), 1)
+    # nsplits = triton.cdiv(nheads_ngroups_ratio, nheads_per_program)
     # dB = torch.empty(batch, seqlen, nsplits, ngroups, dstate, device=x.device, dtype=torch.float32)
-    grid_db = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(dstate, META['BLOCK_SIZE_N']),
-                        batch * nchunks, nsplits * ngroups)
+    grid_db = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']), batch, nchunks)
     with torch.cuda.device(x.device.index):
         _ema_chunk_state_bwd_db_kernel[grid_db](
-            x, dstates, B, dt, dA_cumsum, seq_idx, dB, ddA_cumsum,
-            chunk_size, dstate, headdim,
-            batch, seqlen, nheads, nheads_per_program, ngroups,
-            x.stride(0), x.stride(1), x.stride(2), x.stride(3),
-            dstates.stride(0), dstates.stride(1), dstates.stride(2), dstates.stride(3), dstates.stride(4),
-            *B_strides,
-            dt.stride(0), dt.stride(2), dt.stride(1), dt.stride(3),
-            dA_cumsum.stride(0), dA_cumsum.stride(2), dA_cumsum.stride(1), dA_cumsum.stride(3),
-            *((seq_idx.stride(0), seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
-            dB.stride(0), dB.stride(1), dB.stride(2), dB.stride(3), dB.stride(4),
-            *ddA_cumsum_strides,
+            x, dstates, dA_cumsum, ddA_cumsum,
+            chunk_size, token_dim,
+            batch, seqlen,
+            x.stride(0), x.stride(1), x.stride(2),
+            dstates.stride(0), dstates.stride(1), dstates.stride(2),
+            dA_cumsum.stride(0), dA_cumsum.stride(1), dA_cumsum.stride(2),
+            ddA_cumsum.stride(0), ddA_cumsum.stride(1), ddA_cumsum.stride(2),
             HAS_DDA_CS=ddA_cumsum is not None,
-            HAS_SEQ_IDX=seq_idx is not None,
-            BLOCK_SIZE_K=max(triton.next_power_of_2(headdim), 16),
+            # BLOCK_SIZE_K=max(triton.next_power_of_2(token_dim), 16), # this will not fit into memory
+            BLOCK_SIZE_K=16,
         )
-    dB = dB.sum(2)
     if ddA_cumsum is not None:
         # The first element of ddA_cumsum is always zero, since that dA_cumsum does not contribute
         # to the state of the chunk.
         # torch.cumsum(ddA_cumsum[..., 1:], dim=-1, out=ddA_cumsum[..., 1:])
         # But it's easier to just do the cumsum for all elements, the result will be the same.
         torch.cumsum(ddA_cumsum, dim=-1, out=ddA_cumsum)
-    return dB if B is None else (dB, ddA_cumsum)
+    return ddA_cumsum
 
 
