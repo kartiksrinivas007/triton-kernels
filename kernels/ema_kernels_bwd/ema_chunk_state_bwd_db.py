@@ -16,33 +16,30 @@ def init_to_zero(names):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 32}, num_stages=4, num_warps=2, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 64}, num_stages=4, num_warps=2, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
     ],
-    key=['chunk_size', 'dstate', 'hdim'],
+    key=['chunk_size', 'token_dim'],
 )
 @triton.jit
 def _ema_chunk_state_bwd_db_kernel(
     # Pointers to matrices
     x_ptr, dstates_ptr, dA_cumsum_ptr, ddA_cumsum_ptr,
     # Matrix dimensions
-    chunk_size,token_dim,
+    chunk_size, token_dim,
     batch, seqlen,
     # Strides
     stride_x_batch, stride_x_seqlen, stride_x_token_dim,
     stride_dstates_batch, stride_dstates_chunk, stride_states_token_dim,
     stride_dA_cs_batch, stride_dA_cs_chunk, stride_dA_cs_csize,
     stride_ddA_cs_batch, stride_ddA_cs_chunk, stride_ddA_cs_csize,
-    HAS_DDA_CS: tl.constexpr,
     # Meta-parameters
+    HAS_DDA_CS: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, 
-    BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
 ):
     pid_c = tl.program_id(axis=2)
     pid_b = tl.program_id(axis=1)
@@ -52,73 +49,74 @@ def _ema_chunk_state_bwd_db_kernel(
     # instead we have a tiled matmul between x and dstates, and we use that to compute ddA_cs in the same style
     # we do not need a db, although if needed you can compute it as an intermediate variable, we do nto need dt scaling also
     # the inner product is in token_dim, but token_dim is broken into BLOCK_SIZE_K tiles, so its over BLOCK_SIZE_K
+    # Matmul: dstates (1, token_dim) @ x (token_dim, chunk_size) = (1, chunk_size)
+    # Tiled: dstates_tile (1, BLOCK_SIZE_K) @ x_tile (BLOCK_SIZE_K, BLOCK_SIZE_M) = (1, BLOCK_SIZE_M)
 
-    x_ptr += pid_b * stride_x_batch + pid_c * chunk_size * stride_x_seqlen + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_x_head
-    db_ptr += pid_b * stride_db_batch + pid_c * chunk_size * stride_db_seqlen + pid_g * stride_db_group + pid_s * stride_db_split
-    dstates_ptr += pid_b * stride_dstates_batch + pid_c * stride_dstates_chunk + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_states_head
-    dt_ptr += pid_b * stride_dt_batch + pid_c * stride_dt_chunk + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_dt_head
-    dA_cumsum_ptr += pid_b * stride_dA_cs_batch + pid_c * stride_dA_cs_chunk + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_dA_cs_head
+    # Initialize base pointers
+    x_base = x_ptr + pid_b * stride_x_batch + pid_c * chunk_size * stride_x_seqlen
+    dstates_base = dstates_ptr + pid_b * stride_dstates_batch + pid_c * stride_dstates_chunk
+    dA_cumsum_base = dA_cumsum_ptr + pid_b * stride_dA_cs_batch + pid_c * stride_dA_cs_chunk
     if HAS_DDA_CS:
-        b_ptr += pid_b * stride_b_batch + pid_c * chunk_size * stride_b_seqlen + pid_g * stride_b_head
-        ddA_cumsum_ptr += pid_b * stride_ddA_cs_batch + pid_c * stride_ddA_cs_chunk + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_ddA_cs_head
-    if HAS_SEQ_IDX:
-        seq_idx_ptr += pid_b * stride_seq_idx_batch + pid_c * chunk_size * stride_seq_idx_seqlen
+        ddA_cumsum_base = ddA_cumsum_ptr + pid_b * stride_ddA_cs_batch + pid_c * stride_ddA_cs_chunk
 
+    # Offsets for M dimension (chunk_size)
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # Offsets for K dimension (token_dim tiles)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    x_ptrs = x_ptr + (offs_m[:, None] * stride_x_seqlen + offs_k[None, :] * stride_x_hdim)
-    dstates_ptrs = dstates_ptr + (offs_n[None, :] * stride_states_dstate + offs_k[:, None] * stride_states_hdim)
-    dt_ptrs = dt_ptr + offs_m * stride_dt_csize
-    dA_cumsum_ptrs = dA_cumsum_ptr + offs_m * stride_dA_cs_csize
-    if HAS_DDA_CS:
-        b_ptrs = b_ptr + (offs_m[:, None] * stride_b_seqlen + offs_n[None, :] * stride_b_dstate)
-        ddA_cumsum_ptrs = ddA_cumsum_ptr + offs_m * stride_ddA_cs_csize
 
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    if HAS_DDA_CS:
-        b = tl.load(b_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < dstate), other=0.0).to(tl.float32)
-    if HAS_SEQ_IDX:
-        seq_idx_m = tl.load(seq_idx_ptr + offs_m * stride_seq_idx_seqlen, mask=offs_m < chunk_size_limit, other=-1)
-        seq_idx_last = tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
-    nheads_iter = min(nheads_per_program, nheads // ngroups - pid_s * nheads_per_program)
-    for h in range(nheads_iter):
-        x = tl.load(x_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k[None, :] < hdim), other=0.0)
-        dstates = tl.load(dstates_ptrs, mask=(offs_k[:, None] < hdim) & (offs_n[None, :] < dstate), other=0.0)
-        dstates = dstates.to(x_ptrs.dtype.element_ty)
-        db = tl.dot(x, dstates)
-        dA_cs_last = tl.load(dA_cumsum_ptr + (chunk_size - 1) * stride_dA_cs_csize).to(tl.float32)
-        dA_cs_m = tl.load(dA_cumsum_ptrs, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
-        dt_m = tl.load(dt_ptrs, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
-        if not HAS_SEQ_IDX:
-            # scale = tl.exp(dA_cs_last - dA_cs_m)
-            scale = tl.exp(tl.minimum((dA_cs_last - dA_cs_m), 0.0))
-        else:
-            # scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(dA_cs_last - dA_cs_m), 0.0)
-            scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(tl.minimum((dA_cs_last - dA_cs_m), 0.0)), 0.0)
-        db *= (scale * dt_m)[:, None]
-        if HAS_DDA_CS:
-            # This is the gradient wrt (dA_cs_last - dA_cs_m), i.e. the exclusive reverse cumsum
-            ddA_cs = tl.sum(db * b, axis=1)
-            tl.atomic_add(ddA_cumsum_ptrs + stride_ddA_cs_csize, ddA_cs, mask=offs_m < chunk_size - 1)
-        acc += db
-        x_ptrs += stride_x_head
-        dstates_ptrs += stride_states_head
-        dt_ptrs += stride_dt_head
-        dA_cumsum_ptr += stride_dA_cs_head
-        dA_cumsum_ptrs += stride_dA_cs_head
-        if HAS_DDA_CS:
-            ddA_cumsum_ptrs += stride_ddA_cs_head
+    
+    # Load dA_cumsum values (needed for scaling)
+    dA_cs_last = tl.load(dA_cumsum_base + (chunk_size - 1) * stride_dA_cs_csize).to(tl.float32)
+    dA_cumsum_ptrs = dA_cumsum_base + offs_m * stride_dA_cs_csize
+    dA_cs_m = tl.load(dA_cumsum_ptrs, mask=offs_m < chunk_size_limit, other=0.0).to(tl.float32)
 
-    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    # if HAS_SEQ_IDX:
-    #     seq_idx_last = tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
-    #     seq_idx_m = tl.load(seq_idx_ptr + offs_m * stride_seq_idx_seqlen, mask=offs_m < chunk_size_limit, other=-1)
-    #     acc = tl.where(seq_idx_m[:, None] == seq_idx_last, acc, 0.0)
-    db_ptrs = db_ptr + (offs_m[:, None] * stride_db_seqlen + offs_n[None, :] * stride_db_dstate)
-    tl.store(db_ptrs, acc, mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < dstate))
+    # Compute scale factor (no dt scaling needed per comment)
+    scale = tl.exp(tl.minimum((dA_cs_last - dA_cs_m), 0.0))
+
+    # Initialize accumulator for ddA_cs: (BLOCK_SIZE_M,)
+    # We compute: for each position m, sum over k: dstates[k] * x[m, k] * scale[m]
+    ddA_cs_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    
+    # Tiled matmul: loop over token_dim tiles
+    num_k_tiles = tl.cdiv(token_dim, BLOCK_SIZE_K)
+    for k_tile in range(num_k_tiles):
+        k_start = k_tile * BLOCK_SIZE_K
+        k_mask = (k_start + offs_k) < token_dim
+        
+        # Load dstates tile: (BLOCK_SIZE_K,) - dstates is (batch, nchunks, token_dim), a vector
+        dstates_ptrs = dstates_base + (k_start + offs_k) * stride_states_token_dim
+        dstates_tile = tl.load(dstates_ptrs, mask=k_mask, other=0.0).to(tl.float32)
+        # Reshape to (1, BLOCK_SIZE_K) for matmul
+        dstates_tile_2d = dstates_tile[None, :]  # (1, BLOCK_SIZE_K)
+        
+        # Load x tile: (BLOCK_SIZE_M, BLOCK_SIZE_K) - x is (batch, seqlen, token_dim)
+        # x[m, k] where m is chunk position, k is token_dim
+        x_ptrs = x_base + (offs_m[:, None] * stride_x_seqlen + (k_start + offs_k[None, :]) * stride_x_token_dim)
+        x_tile = tl.load(x_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & k_mask[None, :], other=0.0).to(tl.float32)
+        # x_tile is (BLOCK_SIZE_M, BLOCK_SIZE_K), transpose to (BLOCK_SIZE_K, BLOCK_SIZE_M)
+        x_tile_T = tl.trans(x_tile)  # (BLOCK_SIZE_K, BLOCK_SIZE_M)
+        
+        # Matmul: (1, BLOCK_SIZE_K) @ (BLOCK_SIZE_K, BLOCK_SIZE_M) = (1, BLOCK_SIZE_M)
+        db_tile = tl.dot(dstates_tile_2d, x_tile_T)  # (1, BLOCK_SIZE_M)
+        db_tile = db_tile[0, :]  # (BLOCK_SIZE_M,) - extract the row
+        
+        # Apply scale: scale is (BLOCK_SIZE_M,)
+        db_tile = db_tile * scale
+        
+        # Accumulate ddA_cs across K tiles
+        if HAS_DDA_CS:
+            ddA_cs_acc += db_tile
+
+    # Atomic add ddA_cs to ddA_cumsum at position m+1 (exclusive reverse cumsum)
+    # This is consistent with the mamba kernel pattern. The gradient is computed wrt (dA_cs_last - dA_cs_m),
+    # which requires an exclusive reverse cumsum. The contribution from position m is accumulated into
+    # position m+1, hence the offset. This matches mamba's: ddA_cumsum_ptrs + stride_ddA_cs_csize.
+    # Note: In mamba, atomic_add is needed because multiple heads can write to the same position.
+    # In EMA, each program (pid_m) writes to a unique range, but we keep atomic_add for consistency.
+    if HAS_DDA_CS:
+        ddA_cumsum_ptrs = ddA_cumsum_base + (offs_m + 1) * stride_ddA_cs_csize
+        tl.atomic_add(ddA_cumsum_ptrs, ddA_cs_acc, mask=(offs_m < chunk_size_limit - 1))
 
 
 
@@ -128,12 +126,7 @@ def _ema_chunk_state_bwd_db(x, dA_cumsum, dstates, seq_idx=None, B=None, ngroups
     _, nchunks, chunk_size = dA_cumsum.shape
     assert dstates.shape == (batch, nchunks, token_dim)
     ddA_cumsum = torch.empty(batch, nchunks, chunk_size, device=x.device, dtype=torch.float32)
-    ddA_cumsum_strides = (ddA_cumsum.stride(0), ddA_cumsum.stride(1), ddA_cumsum.stride(2))
 
-    # sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
-    # nheads_per_program = max(min(math.ceil(batch * nchunks * nheads / sm_count), nheads_ngroups_ratio), 1)
-    # nsplits = triton.cdiv(nheads_ngroups_ratio, nheads_per_program)
-    # dB = torch.empty(batch, seqlen, nsplits, ngroups, dstate, device=x.device, dtype=torch.float32)
     grid_db = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']), batch, nchunks)
     with torch.cuda.device(x.device.index):
         _ema_chunk_state_bwd_db_kernel[grid_db](
@@ -145,8 +138,7 @@ def _ema_chunk_state_bwd_db(x, dA_cumsum, dstates, seq_idx=None, B=None, ngroups
             dA_cumsum.stride(0), dA_cumsum.stride(1), dA_cumsum.stride(2),
             ddA_cumsum.stride(0), ddA_cumsum.stride(1), ddA_cumsum.stride(2),
             HAS_DDA_CS=ddA_cumsum is not None,
-            # BLOCK_SIZE_K=max(triton.next_power_of_2(token_dim), 16), # this will not fit into memory
-            BLOCK_SIZE_K=16,
+            BLOCK_SIZE_K=16,  # Fixed tile size for token_dim
         )
     if ddA_cumsum is not None:
         # The first element of ddA_cumsum is always zero, since that dA_cumsum does not contribute
