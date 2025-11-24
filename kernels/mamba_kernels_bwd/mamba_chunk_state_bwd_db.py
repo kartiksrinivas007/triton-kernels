@@ -84,7 +84,7 @@ def _chunk_state_bwd_db_kernel(
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     if HAS_DDA_CS:
         b = tl.load(b_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < dstate), other=0.0).to(tl.float32)
-    if HAS_SEQ_IDX:
+    if HAS_SEQ_I1DX:
         seq_idx_m = tl.load(seq_idx_ptr + offs_m * stride_seq_idx_seqlen, mask=offs_m < chunk_size_limit, other=-1)
         seq_idx_last = tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
     nheads_iter = min(nheads_per_program, nheads // ngroups - pid_s * nheads_per_program)

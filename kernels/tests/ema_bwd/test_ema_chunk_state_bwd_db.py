@@ -1,152 +1,109 @@
 import torch
-import triton
-import triton.language as tl
-import numpy as np
-
-from einops import rearrange, repeat
-
-from kernels.ema_kernels.ema_cumsum import ema_chunk_cumsum_fwd
-from kernels.ema_kernels.ema_state_fwd import _ema_chunk_state_fwd
-from kernels.ema_kernels.ema_state_pass import _ema_state_passing_fwd
-from kernels.ema_kernels.ema_scan_fwd import _ema_scan_fwd
-from kernels.ema_kernels_bwd.ema_scan_bwd import _ema_chunk_scan_bwd_dstates
-from kernels.ema_kernels_bwd.ema_state_passing_bwd_dstates import _ema_state_passing_bwd
-from kernels.ema_kernels_bwd.ema_chunk_scan_chunk_state_bwd_dx import (
-    _chunk_scan_chunk_state_bwd_dx as _ema_chunk_scan_chunk_state_bwd_dx,
-)
-
 import triton.runtime.driver as driver
 
-
-def ema_loop(X, P):
-    B, T, D = X.shape
-    Z = torch.zeros_like(X)
-    for b in range(B):
-        z_prev = torch.zeros(D, device=X.device, dtype=X.dtype)
-        for t in range(T):
-            p = P[b, t, 0]
-            x = X[b, t]
-            z = (1.0 - p) * z_prev + x
-            z_prev = z
-            Z[b, t, :] = z
-    return Z
+from kernels.ema_kernels_bwd.ema_chunk_state_bwd_db import _ema_chunk_state_bwd_db
 
 
-def _get_gpu_specifications(DEVICE):
+def ema_chunk_state_fwd_torch(x_chunks, scale_logits, chunk_size):
+    """
+    Torch equivalent of _ema_chunk_state_fwd:
+      scale_logits = A_cs_last - A_cs_m
+      scale = exp(min(scale_logits, 0))
+      states[b, c, t] = (scale[b, c, None, :] @ x[b, c, :, :]).squeeze(-2)
+    """
 
-    assert torch.cuda.is_available(), "CUDA must be avialble to run triton kernels"
-
-    properties = driver.active.utils.get_device_properties(DEVICE.index)  # type:ignore
-    NUM_SM = properties["multiprocessor_count"]
-    NUM_REGS = properties["max_num_regs"]
-    SIZE_SMEM = properties["max_shared_mem"]
-    WARP_SIZE = properties["warpSize"]
-
-    def is_cuda():
-        return (
-            triton.runtime.driver.active.get_current_target().backend  # type: ignore
-            == "cuda"
-        )
-
-    def supports_host_descriptor():
-        return is_cuda() and torch.cuda.get_device_capability()[0] >= 9
-
-    print("=" * 100)
-    print("Device = ", DEVICE)
-    print("Num REGS per SM  = ", NUM_REGS)
-    print("Num SM  = ", NUM_SM)
-    print("Total Shared memory (bytes) = ", SIZE_SMEM)
-    print("Warp size = ", WARP_SIZE)
-    print("Supports Host Descriptor = ", supports_host_descriptor())
-    print("=" * 100)
-
-    return DEVICE, properties
+    scale = torch.exp(torch.minimum(scale_logits, torch.tensor(0.0, device=x_chunks.device)))  # (B,C,Q)
+    states = torch.matmul(scale.unsqueeze(-2), x_chunks).squeeze(-2)  # (B, C, T)
+    return states
 
 
-class TestEmaChunkScanChunkStateBwdDx:
-    BATCH_SIZE = 4
-    SEQLEN = 512
-    HEAD_DIM = 64
-    MAMBA_HEAD_DIM = 32
-    N_HEADS = 2
-    N_GROUPS = 1
-    DSTATE = 1
-    MAMBA_CHUNK_SIZE = 64
-    NUM_CHUNKS = (SEQLEN + MAMBA_CHUNK_SIZE - 1) // MAMBA_CHUNK_SIZE
 
-    @classmethod
+def ema_chunk_state_cumsum_fwd(x_chunks, A, chunk_size):
+    """
+    Torch equivalent of _ema_chunk_state_fwd:
+      scale = exp(cumsum(A_cs))
+      states[b, c, t] = (scale[b, c, None, :] @ x[b, c, :, :]).squeeze(-2)
+    """
+
+    A_cs = torch.cumsum(A, dim=-1)  # (B,C,Q)
+    scale_logits = A_cs[..., -1, None] - A_cs  # (B,C,Q)
+    scale = torch.exp(torch.minimum(scale_logits, torch.tensor(0.0, device=x_chunks.device)))  # (B,C,Q)
+    states = torch.matmul(scale.unsqueeze(-2), x_chunks).squeeze(-2)  # (B, C, T)
+    return states   
+
+
+class TestEmaChunkStateBwdDb:
     def setup_class(cls):
-        DEVICE = driver.active.get_active_torch_device()  # type: ignore
-        _, properties = _get_gpu_specifications(DEVICE)
-        target = triton.runtime.driver.active.get_current_target()
+        torch.manual_seed(0)
+        cls.device = driver.active.get_active_torch_device()  # type: ignore
+        cls.B = 2
+        cls.CHUNK = 3
+        cls.T = 8
+        cls.NCHUNKS = 1
+        cls.SEQLEN = cls.CHUNK * cls.NCHUNKS
 
-        cls.x = torch.randn(
-            cls.BATCH_SIZE, cls.SEQLEN, cls.HEAD_DIM, device=DEVICE, dtype=torch.float32
+        cls.x = torch.randn(cls.B, cls.SEQLEN, cls.T, device=cls.device, dtype=torch.float32)
+        # Interpret dA_cumsum as (A_cs_last - A_cs_m); keep negative so exp(min(...,0)) stays in exp branch
+        cls.A = -torch.rand(cls.B, cls.NCHUNKS, cls.CHUNK, device=cls.device, dtype=torch.float32)
+        cls.dA_cumsum = torch.cumsum(
+            cls.A,
+            dim=-1,
         )
-        cls.dout = torch.randn_like(cls.x)
-        cls.P = torch.rand(
-            cls.BATCH_SIZE, cls.SEQLEN, 1, device=DEVICE, dtype=torch.float32
-        ).clamp(1e-3, 1 - 1e-3)
+        cls.dstates_up = torch.randn(cls.B, cls.NCHUNKS, cls.T, device=cls.device, dtype=torch.float32)
 
-        # EMA forward chain inputs
-        cls.x_ema = cls.x
-        cls.A_ema = torch.log(1 - cls.P).squeeze(-1)  # (B, L)
-        cls.ema_cs = ema_chunk_cumsum_fwd(
-            cls.A_ema, chunk_size=cls.MAMBA_CHUNK_SIZE
-        )  # (B, C, Q)
+    def test_grad_matches_autograd(self):
+        # Autograd reference
 
-        cls.states = _ema_chunk_state_fwd(
-            cls.x_ema,
-            cls.ema_cs,
-            seq_idx=None,
-            states=None,
-            states_in_fp32=True,
-        )
+        B, L, T = self.x.shape
+        _, C, Q = self.dA_cumsum.shape
+        x_chunks = self.x.view(B, C, Q, T)  # (B,C,Q,T)
+        scale_logits = self.dA_cumsum[..., -1, None] - self.dA_cumsum  # (B,C,Q)
 
-        cls.states_updated, cls.final_states = _ema_state_passing_fwd(
-            cls.states,
-            cls.ema_cs[..., -1],
-            initial_states=None,
-            chunk_size=None,
-            out_dtype=cls.x_ema.dtype,
-        )
+        scale_var = scale_logits.detach().clone().requires_grad_(True)
+        states_ref = ema_chunk_state_fwd_torch(x_chunks, scale_var, self.CHUNK)
+        loss = (states_ref * self.dstates_up).sum()
+        loss.backward()
+        dscale = scale_var.grad
 
-    def test_ema_forward_chain_matches_ema_loop(self):
-        # Full EMA forward via Triton kernels
-        ema_out = _ema_scan_fwd(self.x_ema, self.ema_cs, self.states_updated)
-
-        # Reference EMA forward on original X
-        z_ref = ema_loop(self.x, self.P)
-
-        assert torch.allclose(ema_out, z_ref, atol=1e-2, rtol=1e-2)
-
-    def test_ema_chunk_scan_chunk_state_bwd_dx_matches_autograd(self):
-        # Reference EMA in pure PyTorch on original X
-        x_ref = self.x.detach().clone().requires_grad_(True)
-        z_ref = ema_loop(x_ref, self.P)
-        loss_ref = (z_ref * self.dout).sum()
-        loss_ref.backward()
-        dx_ref = x_ref.grad
-
-        # Triton backward chain (EMA kernels) w.r.t. x_ema = X * P
-        dstates_scan = _ema_chunk_scan_bwd_dstates(self.ema_cs, self.dout)
-        dstates_pass, ddA_chunk, _ = _ema_state_passing_bwd(  # type: ignore
-            self.states_updated,
-            self.ema_cs[..., -1],
-            dstates_scan,
-            chunk_size=self.MAMBA_CHUNK_SIZE,
+        # Kernel output (raw_scale_gradient=True skips the internal cumsum; shifted layout [0, g1, g2])
+        ddA_kernel = _ema_chunk_state_bwd_db(
+            self.x,
+            self.dA_cumsum,
+            self.dstates_up,
+            raw_scale_gradient=True,
         )
 
-        dx_ema = _ema_chunk_scan_chunk_state_bwd_dx(  # type: ignore
-            self.x_ema,
-            self.ema_cs,
-            self.dout,
-            dstates_pass,
-            D=None,
-            seq_idx=None,
-            dx=None,
+        # Adjust for shift: kernel writes g_m into slot m+1
+        expected = torch.cat(
+            [torch.zeros_like(dscale[..., :1]), dscale[..., :-1]], dim=-1
         )
 
 
-        assert torch.allclose(dx_ema, dx_ref, atol=1e-2, rtol=1e-2)
+        assert torch.allclose(ddA_kernel, expected, atol=1e-2, rtol=1e-2)
+    
+    
+    def test_grad_matches_autograd_dA(self):
+        # Autograd reference
 
+        B, L, T = self.x.shape
+        _, C, Q = self.dA_cumsum.shape
+        x_chunks = self.x.view(self.B, self.NCHUNKS, self.CHUNK, self.T)  # (B,C,Q,T)
+        # scale_logits = self.dA_cumsum[..., -1, None] - self.dA_cumsum  # (B,C,Q)
+
+        A_var = self.A.detach().clone().requires_grad_(True)
+        states_ref = ema_chunk_state_cumsum_fwd(x_chunks, A_var, self.CHUNK)
+        loss = (states_ref * self.dstates_up).sum()
+        loss.backward()
+        dA = A_var.grad
+
+        # Kernel output (raw_scale_gradient=False performs the internal cumsum)
+        ddA_kernel = _ema_chunk_state_bwd_db(
+            self.x,
+            self.dA_cumsum,
+            self.dstates_up,
+            raw_scale_gradient=False,
+        )
+
+        # No shift adjustment needed
+        expected = dA
+        assert torch.allclose(ddA_kernel, expected, atol=1e-2, rtol=1e-2)

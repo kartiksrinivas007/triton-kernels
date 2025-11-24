@@ -83,28 +83,26 @@ def _ema_chunk_state_bwd_db_kernel(
     for k_tile in range(num_k_tiles):
         k_start = k_tile * BLOCK_SIZE_K
         k_mask = (k_start + offs_k) < token_dim
-        
-        # Load dstates tile: (BLOCK_SIZE_K,) - dstates is (batch, nchunks, token_dim), a vector
+
+        # Load dstates tile: (BLOCK_SIZE_K,)
         dstates_ptrs = dstates_base + (k_start + offs_k) * stride_states_token_dim
         dstates_tile = tl.load(dstates_ptrs, mask=k_mask, other=0.0).to(tl.float32)
-        # Reshape to (1, BLOCK_SIZE_K) for matmul
-        dstates_tile_2d = dstates_tile[None, :]  # (1, BLOCK_SIZE_K)
-        
-        # Load x tile: (BLOCK_SIZE_M, BLOCK_SIZE_K) - x is (batch, seqlen, token_dim)
-        # x[m, k] where m is chunk position, k is token_dim
-        x_ptrs = x_base + (offs_m[:, None] * stride_x_seqlen + (k_start + offs_k[None, :]) * stride_x_token_dim)
-        x_tile = tl.load(x_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & k_mask[None, :], other=0.0).to(tl.float32)
-        # x_tile is (BLOCK_SIZE_M, BLOCK_SIZE_K), transpose to (BLOCK_SIZE_K, BLOCK_SIZE_M)
-        x_tile_T = tl.trans(x_tile)  # (BLOCK_SIZE_K, BLOCK_SIZE_M)
-        
-        # Matmul: (1, BLOCK_SIZE_K) @ (BLOCK_SIZE_K, BLOCK_SIZE_M) = (1, BLOCK_SIZE_M)
-        db_tile = tl.dot(dstates_tile_2d, x_tile_T)  # (1, BLOCK_SIZE_M)
-        db_tile = db_tile[0, :]  # (BLOCK_SIZE_M,) - extract the row
-        
-        # Apply scale: scale is (BLOCK_SIZE_M,)
+
+        # Load x tile as (K, M) directly
+        x_ptrs = x_base + (
+            (k_start + offs_k)[:, None] * stride_x_token_dim
+            + offs_m[None, :] * stride_x_seqlen
+        )
+        x_tile = tl.load(
+            x_ptrs,
+            mask=k_mask[:, None] & (offs_m[None, :] < chunk_size_limit),
+            other=0.0,
+        ).to(tl.float32)  # (K, M)
+
+        # Elementwise multiply and reduce over K: result shape (M,)
+        db_tile = tl.sum(dstates_tile[:, None] * x_tile, axis=0)
         db_tile = db_tile * scale
-        
-        # Accumulate ddA_cs across K tiles
+
         if HAS_DDA_CS:
             ddA_cs_acc += db_tile
 
@@ -112,16 +110,21 @@ def _ema_chunk_state_bwd_db_kernel(
     # This is consistent with the mamba kernel pattern. The gradient is computed wrt (dA_cs_last - dA_cs_m),
     # which requires an exclusive reverse cumsum. The contribution from position m is accumulated into
     # position m+1, hence the offset. This matches mamba's: ddA_cumsum_ptrs + stride_ddA_cs_csize.
-    # Note: In mamba, atomic_add is needed because multiple heads can write to the same position.
-    # In EMA, each program (pid_m) writes to a unique range, but we keep atomic_add for consistency.
+
+    #TODO(kartiksrinivas): Need to add to the blog to explain tha off-by-one storage clearly her: Need to add to the blog to explain tha off-by-one storrage clearly here.
     if HAS_DDA_CS:
         ddA_cumsum_ptrs = ddA_cumsum_base + (offs_m + 1) * stride_ddA_cs_csize
         tl.atomic_add(ddA_cumsum_ptrs, ddA_cs_acc, mask=(offs_m < chunk_size_limit - 1))
+ 
 
 
 
-
-def _ema_chunk_state_bwd_db(x, dA_cumsum, dstates, seq_idx=None, B=None, ngroups=1):
+def _ema_chunk_state_bwd_db(x, dA_cumsum, dstates, seq_idx=None, B=None, ngroups=1, raw_scale_gradient=False):
+    """
+    The additional argument raw_gradient indicates whether you need to compute
+    the raw gradient with respect to A_cs or you need the gradient with respect
+    to the underlying A_factors.
+    """
     batch, seqlen, token_dim = x.shape
     _, nchunks, chunk_size = dA_cumsum.shape
     assert dstates.shape == (batch, nchunks, token_dim)
@@ -138,14 +141,13 @@ def _ema_chunk_state_bwd_db(x, dA_cumsum, dstates, seq_idx=None, B=None, ngroups
             dA_cumsum.stride(0), dA_cumsum.stride(1), dA_cumsum.stride(2),
             ddA_cumsum.stride(0), ddA_cumsum.stride(1), ddA_cumsum.stride(2),
             HAS_DDA_CS=ddA_cumsum is not None,
-            BLOCK_SIZE_K=16,  # Fixed tile size for token_dim
+            BLOCK_SIZE_K=8,  # Fixed tile size for token_dim
         )
-    if ddA_cumsum is not None:
+    if not raw_scale_gradient:
         # The first element of ddA_cumsum is always zero, since that dA_cumsum does not contribute
         # to the state of the chunk.
         # torch.cumsum(ddA_cumsum[..., 1:], dim=-1, out=ddA_cumsum[..., 1:])
         # But it's easier to just do the cumsum for all elements, the result will be the same.
         torch.cumsum(ddA_cumsum, dim=-1, out=ddA_cumsum)
     return ddA_cumsum
-
 
