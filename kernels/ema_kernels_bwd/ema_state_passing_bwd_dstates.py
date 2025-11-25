@@ -178,6 +178,6 @@ def _ema_state_passing_bwd(
 
     return (
         (dstates, ddA_chunk_cumsum, dinitstates)
-        if states_dtype is None
-        else (dstates, ddA_chunk_cumsum, dinitstates, states_converted)
+        # if states_dtype is None
+        # else (dstates, ddA_chunk_cumsum, dinitstates, states_converted)
     )
