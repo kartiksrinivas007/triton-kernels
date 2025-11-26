@@ -7,12 +7,12 @@ from packaging import version
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 64}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-        triton.Config({'BLOCK_SIZE': 1024}),
-        triton.Config({'BLOCK_SIZE': 2048}),
+        triton.Config({'BLOCK_SIZE': 16}),
+        # triton.Config({'BLOCK_SIZE': 128}),
+        # triton.Config({'BLOCK_SIZE': 256}),
+        # triton.Config({'BLOCK_SIZE': 512}),
+        # triton.Config({'BLOCK_SIZE': 1024}),
+        # triton.Config({'BLOCK_SIZE': 2048}),
     ],
     key=['token_dim'],
 )
@@ -71,6 +71,7 @@ def _ema_state_passing_bwd_kernel(
         out = tl.load(out_ptrs, mask=mask_m, other=0.0).to(tl.float32)
         if CONVERT_STATES:
             tl.store(states_converted_ptrs, out, mask=mask_m)
+
 
         ddA = tl.sum(out * dstates) * scale
         tl.store(ddA_cs_ptr, ddA)

@@ -18,16 +18,19 @@ chunk_state_fwd_configs_old = [
 ]
 
 @triton.autotune(
+    # configs=[
+    #     triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 64}, num_stages=3, num_warps=8),
+    #     triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+    #     triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+    #     triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+    #     triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+    #     triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+    #     triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=5, num_warps=2),
+    #     triton.Config({'BLOCK_SIZE_T': 64,  'BLOCK_SIZE_Q': 32}, num_stages=5, num_warps=2),
+    #     triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=2),
+    # ],
     configs=[
-        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 64}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_T': 64,  'BLOCK_SIZE_Q': 32}, num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=2),
+        triton.Config({'BLOCK_SIZE_T': 16, 'BLOCK_SIZE_Q': 16}, num_stages=3, num_warps=8),
     ],
     key=['token_dim', 'chunk_size'],
 )
@@ -95,7 +98,7 @@ def _ema_chunk_state_fwd_kernel(
         scale = scale.to(x_ptr.dtype.element_ty)
         # scale = tl.zeros((BLOCK_SIZE_Q, ), dtype=tl.float32) + 1.0
 
-        # (BLOCK_SIZE_M, BLOCK_SIZE_N)
+        # (BLOCK_SIZE_T, 1)
         acc += tl.dot(x, scale[:, None])
 
         # update pointers

@@ -58,7 +58,7 @@ def init_to_zero(names):
         #     num_warps=4,
         # ),
         triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+            {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 16, "BLOCK_SIZE_K": 16},
             num_stages=4,
             num_warps=4,
         ),

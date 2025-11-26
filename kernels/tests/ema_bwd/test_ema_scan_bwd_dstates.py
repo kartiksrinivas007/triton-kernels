@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 import numpy as np
 from einops import rearrange, repeat
+import random
 
 # from kernels.ema_kernels_bwd.ema_sc
 from kernels.ema_kernels.ema_cumsum import ema_chunk_cumsum_fwd
@@ -43,14 +44,20 @@ def _get_gpu_specifications(DEVICE):
     return DEVICE, properties
 
 class TestEmaCumsumKernels:
-    BATCH_SIZE = 8
+    BATCH_SIZE = 4
     SEQLEN = 8192
     HEAD_DIM = 512
     MAMBA_HEAD_DIM = 32
     N_HEADS = 16
     DTYPE = torch.float32
-    MAMBA_CHUNK_SIZE = 64 # the chunking level? 
+    MAMBA_CHUNK_SIZE = 128 # the chunking level? 
     NUM_CHUNKS = (SEQLEN + MAMBA_CHUNK_SIZE - 1) // MAMBA_CHUNK_SIZE
+
+
+    seed = random.randint(0, 10000)
+    torch.manual_seed(seed)
+
+
 
 
     @classmethod

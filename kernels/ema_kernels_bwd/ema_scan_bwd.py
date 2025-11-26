@@ -22,16 +22,16 @@ from packaging import version
 @triton.autotune(
     configs=[
         # small/medium head dim
-        triton.Config({'BLOCK_SIZE_T': 64,  'BLOCK_SIZE_K': 32}, num_stages=2, num_warps=2),
-        triton.Config({'BLOCK_SIZE_T': 64,  'BLOCK_SIZE_K': 64}, num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_T': 64,  'BLOCK_SIZE_K': 32}, num_stages=2, num_warps=2),
+        # triton.Config({'BLOCK_SIZE_T': 64,  'BLOCK_SIZE_K': 64}, num_stages=2, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=4),
         # typical EMA shapes (e.g., head_dim≈512–1024, chunk_size=128)
-        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_K': 64},  num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_K': 128}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_K': 64},  num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_K': 128}, num_stages=4, num_warps=8),
+        triton.Config({'BLOCK_SIZE_T': 16, 'BLOCK_SIZE_K': 16},  num_stages=3, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_K': 128}, num_stages=3, num_warps=8),
+        # triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_K': 64},  num_stages=3, num_warps=8),
+        # triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_K': 128}, num_stages=4, num_warps=8),
         # very wide head dim
-        triton.Config({'BLOCK_SIZE_T': 512, 'BLOCK_SIZE_K': 64},  num_stages=4, num_warps=8),
+        # triton.Config({'BLOCK_SIZE_T': 512, 'BLOCK_SIZE_K': 64},  num_stages=4, num_warps=8),
     ],
     key=['token_dim', 'chunk_size'],
 )

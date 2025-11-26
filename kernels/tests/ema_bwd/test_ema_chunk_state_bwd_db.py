@@ -1,5 +1,6 @@
 import torch
 import triton.runtime.driver as driver
+import random
 
 from kernels.ema_kernels_bwd.ema_chunk_state_bwd_db import _ema_chunk_state_bwd_db
 
@@ -34,13 +35,24 @@ def ema_chunk_state_cumsum_fwd(x_chunks, A, chunk_size):
 
 class TestEmaChunkStateBwdDb:
     def setup_class(cls):
-        torch.manual_seed(0)
+
         cls.device = driver.active.get_active_torch_device()  # type: ignore
-        cls.B = 2
-        cls.CHUNK = 3
-        cls.T = 8
-        cls.NCHUNKS = 1
-        cls.SEQLEN = cls.CHUNK * cls.NCHUNKS
+        cls.B = 4
+        cls.CHUNK = 128
+        cls.T = 512
+        cls.SEQLEN = 8192
+        cls.NCHUNKS = (cls.SEQLEN + cls.CHUNK - 1) // cls.CHUNK
+
+        # BATCH_SIZE = 4
+        # SEQLEN = 8192
+        # HEAD_DIM = 512
+        # MAMBA_HEAD_DIM = 32
+        # N_HEADS = 16
+        # DTYPE = torch.float32
+        # MAMBA_CHUNK_SIZE = 128 # the chunking level? 
+        # NUM_CHUNKS = (SEQLEN + MAMBA_CHUNK_SIZE - 1) // MAMBA_CHUNK_SIZE
+
+
 
         cls.x = torch.randn(cls.B, cls.SEQLEN, cls.T, device=cls.device, dtype=torch.float32)
         # Interpret dA_cumsum as (A_cs_last - A_cs_m); keep negative so exp(min(...,0)) stays in exp branch
@@ -52,6 +64,11 @@ class TestEmaChunkStateBwdDb:
         cls.dstates_up = torch.randn(cls.B, cls.NCHUNKS, cls.T, device=cls.device, dtype=torch.float32)
 
     def test_grad_matches_autograd(self):
+        seed = random.randint(0, 10000)
+        torch.manual_seed(seed)
+        print(seed)
+
+
         # Autograd reference
 
         B, L, T = self.x.shape
@@ -83,6 +100,11 @@ class TestEmaChunkStateBwdDb:
     
     
     def test_grad_matches_autograd_dA(self):
+        seed = random.randint(0, 10000)
+        torch.manual_seed(seed)
+        print(seed)
+
+
         # Autograd reference
 
         B, L, T = self.x.shape

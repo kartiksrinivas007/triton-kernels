@@ -10,16 +10,20 @@ from kernels.ema_kernels_bwd import ema_chunk_scan_bwd_dc, ema_chunk_scan_chunk_
 
 
 
-def _ema_chunk_scan_combined_bwd(dout, x, A, out, chunk_size, 
-                                   dt_limit=(0.0, float("inf"))):
+def _ema_chunk_scan_combined_bwd(dout, x, A, chunk_size, 
+                                   dt_limit=(0.0, float("inf")), recompute_output=False):
     if dout.stride(-1) != 1:
         dout = dout.contiguous()
+    
+    A = A.contiguous()
+    x = x.contiguous()
+    
+        
     batch, seqlen, token_dim = x.shape
     nchunks = math.ceil(seqlen / chunk_size)
 
     assert dout.shape == (batch, seqlen, token_dim)
     assert A.shape == (batch, seqlen)
-    assert out.shape == x.shape
 
 
     #####################################################################################
@@ -38,14 +42,16 @@ def _ema_chunk_scan_combined_bwd(dout, x, A, out, chunk_size,
     )
 
     ema_states_updated, ema_final_state = ema_state_pass._ema_state_passing_fwd(
-        ema_states, 
+        ema_states,
         ema_cs[..., -1],
         initial_states=None,
-        chunk_size=None,  # not needed strictly speaking for this algo
+        chunk_size=chunk_size,  # not needed strictly speaking for this algo
         out_dtype=ema_states.dtype
     )
     # maybe if you need recompute_output
-    # ema_output = _ema_scan_fwd(X_ema, ema_cs, ema_states_updated)
+    if recompute_output:
+        ema_output = ema_scan_fwd._ema_scan_fwd(x, ema_cs, ema_states_updated)
+
 
     
     #####################################################################################
@@ -55,17 +61,17 @@ def _ema_chunk_scan_combined_bwd(dout, x, A, out, chunk_size,
     dstates = ema_scan_bwd._ema_chunk_scan_bwd_dstates(ema_cs, dout, seq_idx=None, dtype=ema_states.dtype)
 
     dstates, ddA_chunk_cumsum, _,= ema_state_passing_bwd_dstates._ema_state_passing_bwd(
-        ema_states,
+        ema_states_updated,
         ema_cs[..., -1],
         dstates,
+        chunk_size=chunk_size,
     )
 
     dx = ema_chunk_scan_chunk_state_bwd_dx._chunk_scan_chunk_state_bwd_dx(
         x, ema_cs, dout, dstates, D=None, seq_idx=None, dx=None
     )
-    ddA_next = ema_chunk_state_bwd_db._ema_chunk_state_bwd_db(x, ema_cs, dstates, raw_scale_gradient=False) # alraedy in pure A gradient state
+    ddA_next = ema_chunk_state_bwd_db._ema_chunk_state_bwd_db(x, ema_cs, dstates, raw_scale_gradient=False) # already in pure A gradient state
     ddA_prev = ema_chunk_scan_bwd_dc._ema_chunk_scan_bwd_dC(ema_states_updated, ema_cs, dout, seq_idx=None)
-
     ddA_prev[..., -1] += ddA_chunk_cumsum # gradients flowing in from the "final state"
     ddA_prev = ddA_prev.flip([-1]).cumsum(dim=-1).flip([-1]) # forward gradient sum to bring into pure "A" gradient state
 
@@ -74,4 +80,4 @@ def _ema_chunk_scan_combined_bwd(dout, x, A, out, chunk_size,
 
 
     return_vals = (dx, ddA)
-    return return_vals
+    return return_vals if not recompute_output else (dx, ddA, ema_output)

@@ -16,11 +16,11 @@ def init_to_zero(names):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 32}, num_stages=4, num_warps=2, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64}, num_stages=4, num_warps=2, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 16}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        # triton.Config({'BLOCK_SIZE_M': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        # triton.Config({'BLOCK_SIZE_M': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        # triton.Config({'BLOCK_SIZE_M': 32}, num_stages=4, num_warps=2, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        # triton.Config({'BLOCK_SIZE_M': 64}, num_stages=4, num_warps=2, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
     ],
     key=['chunk_size', 'token_dim'],
 )
@@ -141,7 +141,7 @@ def _ema_chunk_state_bwd_db(x, dA_cumsum, dstates, seq_idx=None, B=None, ngroups
             dA_cumsum.stride(0), dA_cumsum.stride(1), dA_cumsum.stride(2),
             ddA_cumsum.stride(0), ddA_cumsum.stride(1), ddA_cumsum.stride(2),
             HAS_DDA_CS=ddA_cumsum is not None,
-            BLOCK_SIZE_K=8,  # Fixed tile size for token_dim
+            BLOCK_SIZE_K=16,  # Fixed tile size for token_dim
         )
     if not raw_scale_gradient:
         # The first element of ddA_cumsum is always zero, since that dA_cumsum does not contribute

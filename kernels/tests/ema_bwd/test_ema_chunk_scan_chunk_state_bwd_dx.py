@@ -64,15 +64,24 @@ def _get_gpu_specifications(DEVICE):
 
 
 class TestEmaChunkScanChunkStateBwdDx:
+    # BATCH_SIZE = 4
+    # SEQLEN = 512
+    # HEAD_DIM = 64
+    # MAMBA_HEAD_DIM = 32
+    # N_HEADS = 2
+    # N_GROUPS = 1
+    # DSTATE = 1
+    # MAMBA_CHUNK_SIZE = 64
+    # NUM_CHUNKS = (SEQLEN + MAMBA_CHUNK_SIZE - 1) // MAMBA_CHUNK_SIZE
     BATCH_SIZE = 4
-    SEQLEN = 512
-    HEAD_DIM = 64
+    SEQLEN = 8192
+    HEAD_DIM = 512
     MAMBA_HEAD_DIM = 32
-    N_HEADS = 2
-    N_GROUPS = 1
-    DSTATE = 1
-    MAMBA_CHUNK_SIZE = 64
+    N_HEADS = 16
+    DTYPE = torch.float32
+    MAMBA_CHUNK_SIZE = 128 # the chunking level? 
     NUM_CHUNKS = (SEQLEN + MAMBA_CHUNK_SIZE - 1) // MAMBA_CHUNK_SIZE
+
 
     @classmethod
     def setup_class(cls):

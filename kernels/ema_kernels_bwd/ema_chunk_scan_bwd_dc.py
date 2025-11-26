@@ -13,11 +13,11 @@ def init_to_zero(names):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 16}, num_stages=3, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=8),
+        # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=8),
     ],
     key=['chunk_size', 'token_dim'],
 )
@@ -66,13 +66,13 @@ def _ema_chunk_scan_bwd_dc_kernel(
         )
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    tl.max_contiguous(offs_m, BLOCK_SIZE_M)
+    # tl.max_contiguous(offs_m, BLOCK_SIZE_M)
     mask_m = offs_m < chunk_size_limit
 
     acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
 
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    tl.max_contiguous(offs_k, BLOCK_SIZE_K)
+    # tl.max_contiguous(offs_k, BLOCK_SIZE_K)
     dout_ptrs = (
         dout_base
         + offs_m[:, None] * stride_dout_seqlen
