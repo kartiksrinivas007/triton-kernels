@@ -45,26 +45,28 @@ class TestEmaCombinedBwd:
         cls.SEQLEN = 8192
         cls.NCHUNKS = (cls.SEQLEN + cls.CHUNK - 1) // cls.CHUNK
 
+
+        # Make A a leaf tensor so autograd populates .grad
+        cls.A = torch.rand(cls.B, cls.SEQLEN, device=cls.device, dtype=torch.float32)
+        cls.A.neg_()
+        cls.A.requires_grad_()
+        cls.X = torch.randn(cls.B, cls.SEQLEN, cls.TOKEN_DIM, device=cls.device, dtype=torch.float32, requires_grad=True)
+        cls.dout = torch.randn_like(cls.X)
+
     def test_matches_autograd_single_chunk(self):
 
-
-        A = -torch.rand(self.B, self.SEQLEN, device=self.device, dtype=torch.float32)
-        A.requires_grad_()  # keep A as a leaf
-        X = torch.randn(self.B, self.SEQLEN, self.TOKEN_DIM, device=self.device, dtype=torch.float32, requires_grad=True)
-        dout = torch.randn_like(X)
-        P = 1 - torch.exp(A)
-
-        out = ema_loop(X, P)
-        loss = (out * dout).sum()
+        P = 1 - torch.exp(self.A)
+        out = ema_loop(self.X, P)
+        loss = (out * self.dout).sum()
         loss.backward()
 
-        dx_ref = X.grad
-        dA_ref = A.grad
+        dx_ref = self.X.grad
+        dA_ref = self.A.grad
         assert dx_ref is not None and dA_ref is not None
 
         with torch.no_grad():
             dx_kernel, dA_kernel = _ema_chunk_scan_combined_bwd(
-                dout.detach(), X.detach(), A.detach(), out.detach(), self.CHUNK
+                self.dout.detach(), self.X.detach().clone(), self.A.detach().clone(), self.CHUNK
             )
             dA_kernel_reshaped = rearrange(dA_kernel, 'b c s -> b (c s)' )
 
@@ -72,6 +74,8 @@ class TestEmaCombinedBwd:
         assert dA_kernel_reshaped.shape == dA_ref.shape
 
         assert torch.allclose(dx_kernel, dx_ref, atol=1e-2, rtol=1e-2)
+
+        breakpoint()
         assert torch.allclose(dA_kernel_reshaped, dA_ref, atol=1e-2, rtol=1e-2)
 
     def test_recompute_output_matches_forward(self):
@@ -83,7 +87,9 @@ class TestEmaCombinedBwd:
         print(seed)
         torch.manual_seed(seed)
 
-        A = -torch.rand(self.B, self.SEQLEN, device=self.device, dtype=torch.float32).requires_grad_()
+        A = torch.rand(self.B, self.SEQLEN, device=self.device, dtype=torch.float32)
+        A.neg_()
+        A.requires_grad_()
         X = torch.randn(self.B, self.SEQLEN, self.TOKEN_DIM, device=self.device, dtype=torch.float32).requires_grad_()
         P = 1 - torch.exp(A)
         dout = torch.randn_like(X)
@@ -195,3 +201,4 @@ class TestEmaCombinedBwd:
     #     residual_after_prev = residual_after_inside - dA_prev
     #     assert torch.allclose(dA_next, residual_after_prev, atol=1e-2, rtol=1e-2)
     #     assert torch.allclose(dA_total, dA_ref, atol=1e-2, rtol=1e-2)
+
