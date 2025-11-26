@@ -61,7 +61,7 @@ def _ema_chunk_scan_bwd_ddAcs_stable_kernel(
     dout = tl.load(dout_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k[None, :] < token_dim), other=0.0)
     dA_cs_m = tl.load(dA_cumsum_ptr + offs_m * stride_dA_cs_csize, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
     # Actually hi is (pid_m + 1) * BLOCK_SIZE_M - 1 but subtracting 1 makes it slower
-    lo, hi = 0, (pid_m + 1) * BLOCK_SIZE_M
+    lo, hi = 0, (pid_m + 1) * BLOCK_SIZE_M - 1
     # lo, hi = 0, chunk_size
     for start_n in range(lo, hi, BLOCK_SIZE_N):
         start_n = tl.multiple_of(start_n, BLOCK_SIZE_N) # NOTE: This is just a compiler directive that start_n is a multiple
