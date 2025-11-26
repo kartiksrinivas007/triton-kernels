@@ -64,19 +64,21 @@ def _ema_chunk_scan_bwd_ddAcs_stable_kernel(
     lo, hi = 0, (pid_m + 1) * BLOCK_SIZE_M
     # lo, hi = 0, chunk_size
     for start_n in range(lo, hi, BLOCK_SIZE_N):
-        start_n = tl.multiple_of(start_n, BLOCK_SIZE_N)
+        start_n = tl.multiple_of(start_n, BLOCK_SIZE_N) # NOTE: This is just a compiler directive that start_n is a multiple
         # TODO(kartiksrinivas): Trying out the direct tiled matmul approach here, although Tri said it crashed for him
         # Doing a matmul loop with cumsum later on will cause Triton to crash
         # Instead we do just one big matmul
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        x_ptrs_base = x_ptrs
+        dout_ptrs_base = dout_ptrs
         for k in range(0, token_dim, BLOCK_SIZE_K):
-            dout = tl.load(dout_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k[None, :] < token_dim - k), other=0.0)
-            x = tl.load(x_ptrs, mask=(offs_k[:, None] < token_dim - k) & (offs_n[None, :] < chunk_size_limit), other=0.0)
+            dout = tl.load(dout_ptrs_base, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k[None, :] < token_dim - k), other=0.0)
+            x = tl.load(x_ptrs_base, mask=(offs_k[:, None] < token_dim - k) & (offs_n[None, :] < chunk_size_limit - start_n), other=0.0)
             acc += tl.dot(dout, x)
-            dout_ptrs += BLOCK_SIZE_K * stride_dout_token_dim
-            x_ptrs += BLOCK_SIZE_K * stride_x_token_dim
+            dout_ptrs_base += BLOCK_SIZE_K * stride_dout_token_dim
+            x_ptrs_base  += BLOCK_SIZE_K * stride_x_token_dim
 
-        x = tl.load(x_ptrs, mask=(offs_k[:, None] < token_dim) & (offs_n[None, :] < chunk_size_limit - start_n), other=0.0)
+        # x = tl.load(x_ptrs, mask=(offs_k[:, None] < token_dim) & (offs_n[None, :] < chunk_size_limit - start_n), other=0.0)
         # x = tl.load(x_ptrs, mask=(offs_k[:, None] < token_dim) & (offs_n[None, :] < chunk_size_limit - start_n), other=0.0)
         # acc = tl.dot(dout, x)
         # dt_n = tl.load(dt_ptrs, mask=offs_n < chunk_size - start_n, other=0.0).to(tl.float32)
