@@ -8,6 +8,8 @@ from packaging import version
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16}, num_stages=3, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64}, num_stages=4, num_warps=8),
+        # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128}, num_stages=4, num_warps=8),
         # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
         # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4),
         # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
@@ -53,7 +55,7 @@ def _ema_chunk_scan_bwd_ddAcs_stable_kernel(
     x_ptrs = x_ptr + (offs_n[None, :] * stride_x_seqlen + offs_k[:, None] * stride_x_token_dim)
     # dt_ptrs = dt_ptr + offs_n * stride_dt_csize
     # cb_ptrs = cb_ptr + (offs_m[:, None] * stride_cb_csize_m + offs_n[None, :] * stride_cb_csize_n)
-    ddAcs_ptrs = ddA_cumsum_ptr + offs_n * stride_ddA_cs_csize_n # moved ahead by one column
+    ddAcs_ptrs = ddA_cumsum_ptr + offs_n * stride_ddA_cs_csize_n 
     tl.store(ddA_cumsum_ptr, 0.0) # first gradient is zero (1 - p_1)
 
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
@@ -61,7 +63,8 @@ def _ema_chunk_scan_bwd_ddAcs_stable_kernel(
     dout = tl.load(dout_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k[None, :] < token_dim), other=0.0)
     dA_cs_m = tl.load(dA_cumsum_ptr + offs_m * stride_dA_cs_csize, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
     # Actually hi is (pid_m + 1) * BLOCK_SIZE_M - 1 but subtracting 1 makes it slower
-    lo, hi = 0, (pid_m + 1) * BLOCK_SIZE_M - 1
+    lo, hi = 0, (pid_m + 1) * BLOCK_SIZE_M
+    hi = min(hi, chunk_size) # Clamp hi to chunk_size
     # lo, hi = 0, chunk_size
     for start_n in range(lo, hi, BLOCK_SIZE_N):
         start_n = tl.multiple_of(start_n, BLOCK_SIZE_N) # NOTE: This is just a compiler directive that start_n is a multiple
@@ -112,7 +115,7 @@ def _ema_chunk_scan_bwd_ddAcs_stable(x, dA_cumsum, dout):
     _, nchunks, chunk_size = dA_cumsum.shape
     assert dout.shape == x.shape
     BLOCK_SIZE_M_min = 16
-    ddA_cumsum = torch.empty(batch, nchunks, triton.cdiv(chunk_size, BLOCK_SIZE_M_min),
+    ddA_cumsum = torch.zeros(batch, nchunks, triton.cdiv(chunk_size, BLOCK_SIZE_M_min),
                              chunk_size, device=x.device, dtype=torch.float32)
     grid_ddtcs = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']), batch, nchunks)
 
@@ -126,6 +129,7 @@ def _ema_chunk_scan_bwd_ddAcs_stable(x, dA_cumsum, dout):
             dA_cumsum.stride(0), dA_cumsum.stride(1), dA_cumsum.stride(2),
             ddA_cumsum.stride(0), ddA_cumsum.stride(1), ddA_cumsum.stride(2), ddA_cumsum.stride(3),
             BLOCK_SIZE_K=16
+            # BLOCK_SIZE_K =  16
         )
     BLOCK_SIZE_M_actual = _ema_chunk_scan_bwd_ddAcs_stable_kernel.best_config.kwargs["BLOCK_SIZE_M"]
     n_valid_blocks = (chunk_size + BLOCK_SIZE_M_actual - 1) // BLOCK_SIZE_M_actual
