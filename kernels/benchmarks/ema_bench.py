@@ -71,7 +71,7 @@ for head_dim in [1024]:
             bench_configs.append(
                 triton.testing.Benchmark(
                     x_names=["SEQLEN"],
-                    x_vals=[2 ** i for i in range(13, 17)],
+                    x_vals=[2 ** i for i in range(13, 14)],
                     line_arg="provider",
                     line_vals=["triton_matmul", "triton_prefix", "ema_mamba", "mamba"],
                     line_names=["Triton_matmul", "Triton Prefix", "Ema_mamba", "Mamba"],

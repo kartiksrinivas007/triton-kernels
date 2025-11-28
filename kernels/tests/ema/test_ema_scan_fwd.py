@@ -18,6 +18,8 @@ from kernels.mamba_kernels.mamba_bmm import _bmm_chunk_fwd
 
 import triton.runtime.driver as driver
 import math
+import os
+os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
 
 def ema_loop(X, P):
@@ -65,7 +67,7 @@ def _get_gpu_specifications(DEVICE):
 
     return DEVICE, properties
 
-class TestEmaStateFwdKernels:
+class TestEmaScanFwdKernels:
     BATCH_SIZE = 4
     SEQLEN = 8192
     TOKEN_DIM = 512

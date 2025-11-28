@@ -5,34 +5,53 @@ import math
 import triton.language as tl
 
 
+def early_config_prune(configs, named_args, **kwargs):
+    """Filter configs whose block sizes exceed runtime tensor dimensions."""
+    named_args = named_args or {}
+    token_dim = named_args.get('token_dim', kwargs.get('token_dim'))
+    batch = named_args.get('batch', kwargs.get('batch'))
+
+    def _valid(config):
+        block_t = config.kwargs.get('BLOCK_SIZE_T', 0)
+        block_b = config.kwargs.get('BLOCK_SIZE_B', 0)
+        if token_dim is not None and block_t > token_dim:
+            return False
+        if batch is not None and block_b > batch:
+            return False
+        return True
+
+    return [cfg for cfg in configs if _valid(cfg)]
+
+
 # TODO(kartiksrinivas): Add a pruner, for BLOCK_SIZE_T < token_dim
 # TODO(kartiksrinivas): Check correctness with "python -m pytest -v kernels/tests/ema/test_ema_state_pass.py --count=5  --randomly-seed=400244919"
 @triton.autotune(
     configs=[
-        # triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 64}),
-        # triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 8}),
         triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 16}),
-        # triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 8}),
-        # triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 256}),
-        # triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 512}),
-        # triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 64}),
-        # triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 128}),
-        # triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 256}),
-        # triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 512}),
-        # triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 64}),
-        # triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 128}),
-        # triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 256}),
-        # triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 512}),
-        # triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 64}),
-        # triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 128}),
-        # triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 256}),
-        # triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 512}),
-        # triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 256}),
-        # triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 512}),
-        # triton.Config({'BLOCK_SIZE_T': 1024}), -- causes bugs! its bigger than token_dim
-        # triton.Config({'BLOCK_SIZE_T': 2048}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 64}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 256}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 512}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 1024}),
+        triton.Config({'BLOCK_SIZE_B': 1, 'BLOCK_SIZE_T': 2048}),
+        triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 64}),
+        triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 256}),
+        triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 512}),
+        triton.Config({'BLOCK_SIZE_B': 4, 'BLOCK_SIZE_T': 1024}),
+        triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 64}),
+        triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 256}),
+        triton.Config({'BLOCK_SIZE_B': 8, 'BLOCK_SIZE_T': 512}),
+        triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 64}),
+        triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 128}),
+        triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 256}),
+        triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 512}),
+        triton.Config({'BLOCK_SIZE_B': 16, 'BLOCK_SIZE_T': 1024}),
     ],
-    key=['token_dim'],
+    key=['token_dim', 'batch'],
+    prune_configs_by={"early_config_prune": early_config_prune},
 )
 @triton.jit
 def _ema_state_passing_fwd_kernel(
@@ -118,13 +137,19 @@ def _ema_state_passing_fwd(states : torch.Tensor, A_cs_last : torch.Tensor , ini
     with torch.cuda.device(states.device.index):
         _ema_state_passing_fwd_kernel[grid](
             states, out, final_states, A_cs_last, initial_states,
-            token_dim, nchunks, batch ,
-            states.stride(0), states.stride(1), states.stride(2),
-            out.stride(0), out.stride(1), out.stride(2),
-            final_states.stride(0), final_states.stride(1),
-            A_cs_last.stride(0), A_cs_last.stride(1),
-            # BLOCK_SIZE_B = 1 # no blocking  over batch for now
+            token_dim=token_dim,
+            nchunks=nchunks,
+            batch=batch,
+            stride_states_batch=states.stride(0),
+            stride_states_chunk=states.stride(1),
+            stride_states_token_dim=states.stride(2),
+            stride_out_batch=out.stride(0),
+            stride_out_chunk=out.stride(1),
+            stride_out_token_dim=out.stride(2),
+            stride_final_states_batch=final_states.stride(0),
+            stride_final_states_token_dim=final_states.stride(1),
+            stride_A_cs_last_batch=A_cs_last.stride(0),
+            stride_A_cs_last_chunk=A_cs_last.stride(1),
         )
     return out, final_states
-
 

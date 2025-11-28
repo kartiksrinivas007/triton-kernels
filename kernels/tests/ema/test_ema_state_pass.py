@@ -1,3 +1,4 @@
+import os
 import torch
 import triton
 import triton.language as tl
@@ -15,6 +16,8 @@ from kernels.mamba_kernels.mamba_state_pass import _state_passing_fwd
 
 import triton.runtime.driver as driver
 import math
+
+os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "1")
 
 
 def _get_gpu_specifications(DEVICE):
@@ -144,5 +147,4 @@ class TestEmaStateFwdKernels:
         assert (torch.allclose(mamba_test, ema_states_updated, atol=1e-2))
 
         
-
 

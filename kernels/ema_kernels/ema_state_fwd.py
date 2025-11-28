@@ -17,22 +17,38 @@ chunk_state_fwd_configs_old = [
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=2),
 ]
 
+def _prune_chunk_state_configs(configs, named_args, **kwargs):
+    """Drop configs that try to process more data than available at runtime."""
+    named_args = named_args or {}
+    token_dim = named_args.get("token_dim", kwargs.get("token_dim"))
+    chunk_size = named_args.get("chunk_size", kwargs.get("chunk_size"))
+
+    def _is_valid(config):
+        block_t = config.kwargs.get("BLOCK_SIZE_T", 0)
+        block_q = config.kwargs.get("BLOCK_SIZE_Q", 0)
+        if token_dim is not None and block_t > token_dim:
+            return False
+        if chunk_size is not None and block_q > chunk_size:
+            return False
+        return True
+
+    return [config for config in configs if _is_valid(config)]
+
 @triton.autotune(
-    # configs=[
-    #     triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 64}, num_stages=3, num_warps=8),
-    #     triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-    #     triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-    #     triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-    #     triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-    #     triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
-    #     triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=5, num_warps=2),
-    #     triton.Config({'BLOCK_SIZE_T': 64,  'BLOCK_SIZE_Q': 32}, num_stages=5, num_warps=2),
-    #     triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=2),
-    # ],
     configs=[
+        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_T': 256, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_T': 64,  'BLOCK_SIZE_Q': 32}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_T': 128, 'BLOCK_SIZE_Q': 32}, num_stages=4, num_warps=2),
         triton.Config({'BLOCK_SIZE_T': 16, 'BLOCK_SIZE_Q': 16}, num_stages=3, num_warps=8),
     ],
-    key=['token_dim', 'chunk_size'],
+    key=['token_dim', 'chunk_size', 'seqlen'],
+    prune_configs_by={"early_config_prune": _prune_chunk_state_configs},
 )
 @triton.jit
 def _ema_chunk_state_fwd_kernel(
@@ -130,10 +146,18 @@ def _ema_chunk_state_fwd(x, A_cumsum, seq_idx=None, states=None, states_in_fp32=
     with torch.cuda.device(x.device.index):
         _ema_chunk_state_fwd_kernel[grid](
             x, A_cumsum, states,
-            token_dim, chunk_size,
-            batch, seqlen,
-            x.stride(0), x.stride(1), x.stride(2),
-            A_cumsum.stride(0), A_cumsum.stride(1), A_cumsum.stride(2),
-            states.stride(0), states.stride(1), states.stride(2),
+            token_dim=token_dim,
+            chunk_size=chunk_size,
+            batch=batch,
+            seqlen=seqlen,
+            stride_x_batch=x.stride(0),
+            stride_x_seqlen=x.stride(1),
+            stride_x_token_dim=x.stride(2),
+            stride_A_cs_batch=A_cumsum.stride(0),
+            stride_A_cs_chunk=A_cumsum.stride(1),
+            stride_A_cs_csize=A_cumsum.stride(2),
+            stride_states_batch=states.stride(0),
+            stride_states_chunk=states.stride(1),
+            stride_states_token_dim=states.stride(2),
         )
     return states

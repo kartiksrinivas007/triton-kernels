@@ -7,31 +7,47 @@ from packaging import version
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
-# @triton.autotune(
-#     configs=[
-#         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
-#         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
-#         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
-#         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=2),
-#     ],
-#     key=['chunk_size', 'token_dim', 'IS_CAUSAL'],
-# )
+def early_config_prune(configs, named_args, **kwargs):
+    """Keep only configs whose tile sizes fit inside runtime tensor dims."""
+    named_args = named_args or {}
+    chunk_size = named_args.get('chunk_size', kwargs.get('chunk_size'))
+    token_dim = named_args.get('token_dim', kwargs.get('token_dim'))
+
+    def _valid(config):
+        block_m = config.kwargs.get('BLOCK_SIZE_M', 0)
+        block_n = config.kwargs.get('BLOCK_SIZE_N', 0)
+        block_k = config.kwargs.get('BLOCK_SIZE_K', 0)
+
+        if chunk_size is not None:
+            if block_m > chunk_size or block_k > chunk_size:
+                return False
+        if token_dim is not None and block_n > token_dim:
+            return False
+        return True
+
+    return [cfg for cfg in configs if _valid(cfg)]
+
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 16}, num_stages=3, num_warps=8),
-        # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
-        # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64 , 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
-        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128 , 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
-        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 256 , 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64 , 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128 , 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 256 , 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=2),
     ],
     key=['chunk_size', 'token_dim', 'IS_CAUSAL'],
+    prune_configs_by={"early_config_prune": early_config_prune},
 )
 @triton.jit
 def _ema_scan_fwd_kernel(
@@ -155,12 +171,22 @@ def _ema_scan_fwd(x, A_cumsum, states):
 
     _ema_scan_fwd_kernel[grid](
         x, out, A_cumsum, states,
-        chunk_size, token_dim,
-        batch, seqlen,
-        x.stride(0), x.stride(1), x.stride(2),
-        out.stride(0), out.stride(1), out.stride(2),
-        A_cumsum.stride(0), A_cumsum.stride(1), A_cumsum.stride(2),
-        states.stride(0), states.stride(1), states.stride(2),
+        chunk_size=chunk_size,
+        token_dim=token_dim,
+        batch=batch,
+        seqlen=seqlen,
+        stride_x_batch=x.stride(0),
+        stride_x_seqlen=x.stride(1),
+        stride_x_token_dim=x.stride(2),
+        stride_out_batch=out.stride(0),
+        stride_out_seqlen=out.stride(1),
+        stride_out_token_dim=out.stride(2),
+        stride_A_cs_batch=A_cumsum.stride(0),
+        stride_A_cs_chunk=A_cumsum.stride(1),
+        stride_A_cs_csize=A_cumsum.stride(2),
+        stride_states_batch=states.stride(0),
+        stride_states_chunk=states.stride(1),
+        stride_states_token_dim=states.stride(2),
         IS_CAUSAL=True,
         IS_TRITON_22=TRITON_22,
     )

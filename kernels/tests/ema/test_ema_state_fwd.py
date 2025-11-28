@@ -3,9 +3,15 @@ import triton
 import triton.language as tl
 import numpy as np
 from einops import rearrange, repeat
+import os
+os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+
 
 from kernels.ema_kernels.ema_cumsum import ema_chunk_cumsum_fwd
-from kernels.ema_kernels.ema_state_fwd import _ema_chunk_state_fwd
+from kernels.ema_kernels.ema_state_fwd import (
+    _ema_chunk_state_fwd,
+    _ema_chunk_state_fwd_kernel,
+)
 
 from kernels.mamba_kernels.mamba_cumsum import _chunk_cumsum_fwd
 from kernels.mamba_kernels.mamba_state_fwd import _chunk_state_fwd
@@ -79,6 +85,25 @@ def _get_gpu_specifications(DEVICE):
     print("=" * 100)
 
     return DEVICE, properties
+
+
+def print_triton_autotune_configs(kernel, kernel_name="kernel"):
+    if not hasattr(kernel, "autotune"):
+        print(f"[{kernel_name}] No autotuner attached.")
+        return
+
+    cache = getattr(kernel.autotune, "_cache", None)
+    if not cache:
+        print(f"[{kernel_name}] No autotune results cached yet.")
+        return
+
+    print(f"\n[{kernel_name}] ---- Optimal Triton autotune configs ----")
+    for key, cfg in cache.items():
+        print(f"Key: {key}")
+        print(f"  num_warps   = {cfg.num_warps}")
+        print(f"  num_stages  = {cfg.num_stages}")
+        print(f"  kwargs      = {cfg.kwargs}")
+        print("----------------------------------------------------")
 
 class TestEmaStateFwdKernels:
     BATCH_SIZE = 8
@@ -164,5 +189,6 @@ class TestEmaStateFwdKernels:
         vals = torch_state_fwd(ema_cs, self.X_ema.view(self.BATCH_SIZE, self.NUM_CHUNKS, self.MAMBA_CHUNK_SIZE, self.TOKEN_DIM))
 
         assert torch.allclose(vals, ema_states, atol=1e-2)
-        
 
+        print_triton_autotune_configs(_ema_chunk_state_fwd_kernel, "_ema_chunk_state_fwd_kernel")
+        
