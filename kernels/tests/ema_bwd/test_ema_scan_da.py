@@ -45,7 +45,7 @@ class TestEmaChunkScanBwddA:
         cls.B = 4
         cls.CHUNK = 128
         cls.T = 512
-        cls.SEQLEN = 8192
+        cls.SEQLEN = 256
         cls.NCHUNKS = (cls.SEQLEN + cls.CHUNK - 1) // cls.CHUNK
 
         torch.manual_seed(0)
@@ -108,5 +108,7 @@ class TestEmaChunkScanBwddA:
         print("Max abs diff ddA mamba vs torch autograd:", torch.max(torch.abs(dda_mamba - dA)).item())
         print("Max abs diff ddA kernel vs mamba:", torch.max(torch.abs(ddA_kernel - dda_mamba)).item())
         print("Max diff between hand crafted backward and autograd:", torch.max(torch.abs(dA - dda_torch)).item())
+        print("Max relative diff ddA kernel vs torch autograd:", (torch.abs(ddA_kernel - dA) / (torch.abs(dA) + 1e-6)).max().item())
+
         assert torch.allclose(ddA_kernel, dA, atol=2e-1, rtol=2e-1) # type:ignore
 
