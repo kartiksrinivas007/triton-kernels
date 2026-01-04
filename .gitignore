@@ -1,2 +1,4 @@
 .vscode
 __pycache__
+tmp/
+mamba_ssd_fwd.py
