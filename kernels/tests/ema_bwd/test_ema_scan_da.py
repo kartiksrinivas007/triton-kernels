@@ -91,6 +91,7 @@ class TestEmaChunkScanBwddA:
             self.CHUNK,
         )
 
+        #NOTE: The mamba kernel here is inaccurate because it uses the tf32 format for computation
         HEADS = 4
         dt = torch.ones(self.B, HEADS, self.NCHUNKS, self.CHUNK, device=self.device, dtype=torch.float32)
         cb = torch.ones(self.B, self.NCHUNKS, 1, self.CHUNK, self.CHUNK, device=self.device, dtype=torch.float32)
@@ -107,8 +108,7 @@ class TestEmaChunkScanBwddA:
         print("\n Max abs diff ddA kernel vs torch autograd:", torch.max(torch.abs(ddA_kernel - dA)).item())
         print("Max abs diff ddA mamba vs torch autograd:", torch.max(torch.abs(dda_mamba - dA)).item())
         print("Max abs diff ddA kernel vs mamba:", torch.max(torch.abs(ddA_kernel - dda_mamba)).item())
-        print("Max diff between hand crafted backward and autograd:", torch.max(torch.abs(dA - dda_torch)).item())
-        print("Max relative diff ddA kernel vs torch autograd:", (torch.abs(ddA_kernel - dA) / (torch.abs(dA) + 1e-6)).max().item())
+        breakpoint()
 
-        assert torch.allclose(ddA_kernel, dA, atol=2e-1, rtol=2e-1) # type:ignore
+        assert torch.allclose(ddA_kernel, dA, atol=1e-2, rtol=1e-2) # type:ignore
 
